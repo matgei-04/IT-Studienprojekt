@@ -1,0 +1,29 @@
+# Selbst erstellt – bitte prüfen und erklären können.
+"""Strukturierte Ergebnis- und Konfigurationsobjekte der Extraktion."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+
+
+@dataclass
+class IncomingDocument:
+    """Ergebnis der Extraktion für ein einzelnes PDF-Dokument."""
+
+    path: Path
+    text: str
+    document_type: str
+    order_number: str | None
+    confidence: float
+    used_ocr: bool
+    extraction_notes: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Settings:
+    """Laufzeit-Einstellungen (typischerweise aus .env)."""
+
+    scan_directory: Path
+    min_direct_text_length: int = 40
+    ocr_language: str = "deu"
