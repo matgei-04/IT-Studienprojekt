@@ -44,7 +44,6 @@ def test_extract_single_document_direct_text(tmp_path: Path, settings: Settings)
     assert result.document_type == "frachtpapier"
     assert result.order_number == "44221"
     assert "Direkter Text" in " ".join(result.extraction_notes)
-    assert result.confidence > 0.0
     assert "Frachtbrief" in result.text or "ErfNr" in result.text
 
 
@@ -57,11 +56,13 @@ def test_extract_from_directory_lists_pdfs_only(tmp_path: Path, settings: Settin
     (tmp_path / "unterordner").mkdir()
     _write_text_pdf(
         tmp_path / "unterordner" / "nested.pdf",
-        "soll nicht rekursiv gefunden werden ErfNr 111",
+        "Frachtbrief Absender Empfänger ErfNr 33445 Frachtführer",
     )
 
     docs = extract_from_directory(settings)
-    assert len(docs) == 1
-    assert docs[0].path.name == "a.pdf"
-    assert docs[0].document_type == "schadensmeldung"
-    assert docs[0].order_number == "99112"
+    assert len(docs) == 2
+    by_name = {doc.path.name: doc for doc in docs}
+    assert by_name["a.pdf"].document_type == "schadensmeldung"
+    assert by_name["a.pdf"].order_number == "99112"
+    assert by_name["nested.pdf"].document_type == "frachtpapier"
+    assert by_name["nested.pdf"].order_number == "33445"

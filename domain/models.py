@@ -15,7 +15,6 @@ class IncomingDocument:
     text: str
     document_type: str
     order_number: str | None
-    confidence: float
     used_ocr: bool
     extraction_notes: list[str] = field(default_factory=list)
 

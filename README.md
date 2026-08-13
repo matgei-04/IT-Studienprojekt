@@ -22,7 +22,7 @@ cp .env.example .env   # falls noch keine .env existiert
 ```
 
 PDFs **nur lesen** – Dateien werden weder verschoben noch gelöscht.
-Lege Beispieldokumente in `sample_scans/` (nicht rekursiv, nur `.pdf`).
+Lege Beispieldokumente in `sample_scans/` (auch Unterordner, nur `.pdf`).
 
 In `.env` können zusätzlich gesetzt werden:
 - `SCAN_DIRECTORY`, `MIN_DIRECT_TEXT_LENGTH`, `OCR_LANGUAGE` (Extraktion)
@@ -35,7 +35,7 @@ python run_extraction.py
 ```
 
 Pro Dokument erscheinen: Dateiname, Typ, `order_number`, `used_ocr`,
-`confidence`, Textvorschau und kurze Ablaufhinweise.
+Textvorschau und kurze Ablaufhinweise.
 
 ## Öffentliche API (für Matching / UI)
 
@@ -56,13 +56,12 @@ docs = extract_from_directory(settings)
 | `text` | Extrahierter Volltext |
 | `document_type` | `frachtpapier` \| `schadensmeldung` \| `eingangsrechnung` \| `wareneingangsschein` \| `unbekannt` |
 | `order_number` | erkannte Nummer oder `None` |
-| `confidence` | 0.0–1.0 Gesamtsicherheit |
 | `used_ocr` | `True`, wenn OCR-Fallback genutzt wurde |
 | `extraction_notes` | kurze Hinweise zum Ablauf |
 
 ## Pipeline (kurz)
 
-1. PDFs im Scan-Ordner listen (nicht rekursiv)
+1. PDFs im Scan-Ordner listen (rekursiv)
 2. Eingebetteten PDF-Text lesen (PyMuPDF)
 3. Wenn Textlänge &lt; `MIN_DIRECT_TEXT_LENGTH` → OCR (Tesseract)
 4. Dokumenttyp per Schlüsselwörter
@@ -92,5 +91,6 @@ pytest -q
 
 Matching ruft `extract_from_directory(settings)` (oder `extract_single_document`)
 auf und erhält eine Liste von `IncomingDocument`. Maßgeblich für die Zuordnung
-sind vor allem `order_number`, `document_type`, `text` und `confidence`.
+sind vor allem `order_number`, `document_type` und `text`.
+Die Matching-Sicherheit berechnet Matching später gegen die Datenbank.
 Dateien im Scan-Ordner bleiben unverändert.

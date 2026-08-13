@@ -46,7 +46,6 @@ def main() -> int:
         print(f"Typ:          {doc.document_type}")
         print(f"order_number: {doc.order_number}")
         print(f"used_ocr:     {doc.used_ocr}")
-        print(f"confidence:   {doc.confidence}")
         print(f"Vorschau:     {_preview(doc.text)}")
         print(f"Hinweise:     {'; '.join(doc.extraction_notes)}")
         print("-" * 60)
