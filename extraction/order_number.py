@@ -1,4 +1,3 @@
-# Selbst erstellt – bitte prüfen und erklären können.
 """Erkennung von Auftrags-/Sendungsnummern (ErfNr) im Dokumenttext."""
 
 from __future__ import annotations

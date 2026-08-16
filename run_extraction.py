@@ -1,4 +1,3 @@
-# Selbst erstellt – bitte prüfen und erklären können.
 """CLI-Einstieg: Scan-Ordner verarbeiten und Kurzüberblick ausgeben."""
 
 from __future__ import annotations

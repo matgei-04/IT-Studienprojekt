@@ -1,4 +1,3 @@
-# Selbst erstellt – bitte prüfen und erklären können.
 """Laden der Extraktions-Einstellungen aus Umgebungsvariablen / .env."""
 
 from __future__ import annotations

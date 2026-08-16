@@ -1,4 +1,3 @@
-# Selbst erstellt – bitte prüfen und erklären können.
 """Strukturierte Ergebnis- und Konfigurationsobjekte der Extraktion."""
 
 from __future__ import annotations

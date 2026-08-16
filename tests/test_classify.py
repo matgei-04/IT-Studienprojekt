@@ -1,4 +1,3 @@
-# Selbst erstellt – bitte prüfen und erklären können.
 """Tests zur Dokumenttyp-Klassifikation."""
 
 from extraction.classify import classify_document_type

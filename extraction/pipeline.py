@@ -1,4 +1,3 @@
-# Selbst erstellt – bitte prüfen und erklären können.
 """Orchestrierung der Extraktions-Pipeline für einzelne PDFs und Ordner."""
 
 from __future__ import annotations

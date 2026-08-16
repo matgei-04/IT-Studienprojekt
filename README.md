@@ -87,10 +87,15 @@ pytest -q
 | `extraction/order_number.py` | ErfNr / Auftragsnr. |
 | `extraction/pipeline.py` | Orchestrierung / öffentliche API |
 
-## Was Matching von diesem Modul erwartet
+## Matching (Anbindung)
 
-Matching ruft `extract_from_directory(settings)` (oder `extract_single_document`)
-auf und erhält eine Liste von `IncomingDocument`. Maßgeblich für die Zuordnung
-sind vor allem `order_number`, `document_type` und `text`.
-Die Matching-Sicherheit berechnet Matching später gegen die Datenbank.
+```bash
+python run_matching.py   # braucht SUPABASE_URL / SUPABASE_KEY in .env
+```
+
+Matching nutzt `extract_from_directory` und liefert `MatchResult` mit
+`confidence` (Matching-Score). **Immer** manuelle Bestätigung
+(`needs_manual_review=True`). Details: `matching/README.md`.
+
+Maßgeblich aus der Extraktion: `order_number`, `document_type`, `text`.
 Dateien im Scan-Ordner bleiben unverändert.

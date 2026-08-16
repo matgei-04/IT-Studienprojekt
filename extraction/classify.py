@@ -1,4 +1,3 @@
-# Selbst erstellt – bitte prüfen und erklären können.
 """Grobe Dokumenttyp-Klassifikation anhand von Schlüsselwörtern."""
 
 from __future__ import annotations

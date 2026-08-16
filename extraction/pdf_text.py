@@ -1,4 +1,3 @@
-# Selbst erstellt – bitte prüfen und erklären können.
 """Direkte Textextraktion aus PDFs (eingebetteter Text, ohne OCR)."""
 
 from __future__ import annotations

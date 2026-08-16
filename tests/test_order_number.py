@@ -1,4 +1,3 @@
-# Selbst erstellt – bitte prüfen und erklären können.
 """Tests zur Auftragsnummer-Erkennung inkl. False-Positive-Filter."""
 
 from extraction.order_number import find_order_number

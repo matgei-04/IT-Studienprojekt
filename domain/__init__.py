@@ -1,4 +1,3 @@
-# Selbst erstellt – bitte prüfen und erklären können.
 """Domain-Modelle für die Datenextraktion."""
 
 from domain.models import IncomingDocument, Settings

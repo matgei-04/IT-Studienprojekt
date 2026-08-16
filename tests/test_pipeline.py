@@ -1,4 +1,3 @@
-# Selbst erstellt – bitte prüfen und erklären können.
 """Pipeline-Tests mit Temp-PDF (direkter Text, ohne echtes OCR)."""
 
 from __future__ import annotations

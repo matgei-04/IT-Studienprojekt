@@ -1,4 +1,3 @@
-# Selbst erstellt – bitte prüfen und erklären können.
 """OCR-Fallback mit Tesseract für gescannte bzw. textarme PDFs."""
 
 from __future__ import annotations
