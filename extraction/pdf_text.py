@@ -1,4 +1,4 @@
-"""Direkte Textextraktion aus PDFs (eingebetteter Text, ohne OCR)."""
+"""Text direkt aus einer PDF lesen (ohne OCR)."""
 
 from __future__ import annotations
 
@@ -8,18 +8,20 @@ import fitz  # PyMuPDF
 
 
 def extract_direct_text(pdf_path: Path) -> str:
-    """Liest den eingebetteten Text aller Seiten und gibt ihn bereinigt zurück."""
-    pages: list[str] = []
+    """Liest den eingebetteten Text aller Seiten."""
+    pages = []
     with fitz.open(pdf_path) as document:
         for page in document:
-            page_text = page.get_text("text") or ""
-            pages.append(page_text)
+            pages.append(page.get_text("text") or "")
 
-    combined = "\n".join(pages)
-    return _normalize_whitespace(combined)
+    return _clean_text("\n".join(pages))
 
 
-def _normalize_whitespace(text: str) -> str:
-    """Kürzt übermäßige Leerzeichen, behält Zeilenumbrüche grob bei."""
-    lines = [" ".join(line.split()) for line in text.splitlines()]
-    return "\n".join(line for line in lines if line).strip()
+def _clean_text(text: str) -> str:
+    """Doppelte Leerzeichen entfernen, leere Zeilen weglassen."""
+    clean_lines = []
+    for line in text.splitlines():
+        line = " ".join(line.split())
+        if line:
+            clean_lines.append(line)
+    return "\n".join(clean_lines).strip()

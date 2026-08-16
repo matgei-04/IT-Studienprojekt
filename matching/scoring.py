@@ -1,161 +1,126 @@
-"""Berechnung der Ähnlichkeit zwischen Dokument und DB-Kandidat."""
+"""Ähnlichkeit zwischen Dokument und DB-Auftrag berechnen."""
 
 from __future__ import annotations
-
-import re
-import unicodedata
 
 from domain.models import IncomingDocument
 from matching.models import Candidate, ScoreBreakdown
 
-# Gewichte (später gemeinsam mit dem Team justierbar)
-WEIGHT_ORDER_NUMBER = 0.50
+# Gewichtung des Matching-Scores (Summe = 1.0)
+WEIGHT_ORDER = 0.50
 WEIGHT_REFERENCE = 0.15
 WEIGHT_SENDER = 0.15
 WEIGHT_RECEIVER = 0.15
-WEIGHT_DOCUMENT_TYPE = 0.05
+WEIGHT_TYPE = 0.05
 
 
 def normalize(value: str | None) -> str:
-    """Normalisiert Text für robuste Vergleiche."""
+    """Text vereinheitlichen: klein, ohne Sonderzeichen-Chaos."""
     if not value:
         return ""
-
-    value = unicodedata.normalize("NFKD", value)
-    value = "".join(char for char in value if not unicodedata.combining(char))
-    value = value.casefold()
-    value = re.sub(r"[^a-z0-9äöüß ]+", " ", value)
-    value = re.sub(r"\s+", " ", value)
-    return value.strip()
+    return " ".join(value.casefold().split())
 
 
-def token_similarity(left: str | None, right: str | None) -> float:
-    """Berechnet Jaccard-Ähnlichkeit auf Token-Ebene."""
-    left_normalized = normalize(left)
-    right_normalized = normalize(right)
-
-    if not left_normalized or not right_normalized:
+def text_contains(document_text: str, value: str | None) -> float:
+    """
+    Wie gut kommt ein DB-Wert im Dokument vor?
+    1.0 = exakt enthalten, sonst Anteil gemeinsamer Wörter, sonst 0.
+    """
+    needle = normalize(value)
+    haystack = normalize(document_text)
+    if not needle or not haystack:
         return 0.0
-
-    if left_normalized == right_normalized:
+    if needle in haystack:
         return 1.0
 
-    left_tokens = set(left_normalized.split())
-    right_tokens = set(right_normalized.split())
-
-    if not left_tokens or not right_tokens:
+    words_a = set(needle.split())
+    words_b = set(haystack.split())
+    if not words_a or not words_b:
         return 0.0
-
-    return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
-
-
-def contains_similarity(document_text: str, database_value: str | None) -> float:
-    """Prüft, wie gut ein DB-Wert im Dokumenttext vorkommt."""
-    db_value = normalize(database_value)
-    text = normalize(document_text)
-
-    if not db_value or not text:
-        return 0.0
-
-    if db_value in text:
-        return 1.0
-
-    return token_similarity(text, db_value)
+    shared = words_a & words_b
+    all_words = words_a | words_b
+    return len(shared) / len(all_words)
 
 
-def _address_score(
+def address_score(
     document_text: str,
     name: str | None,
     street: str | None,
     plz: str | None,
     city: str | None,
 ) -> float:
-    """Bewertet eine Adresse anhand mehrerer Felder."""
-    values = [
+    """Adresse bewerten: Name zählt am meisten."""
+    parts = [
         (name, 0.50),
-        (street, 0.15),
         (plz, 0.20),
+        (street, 0.15),
         (city, 0.15),
     ]
+    scores = []
+    weights = []
+    for value, weight in parts:
+        if value:
+            scores.append(text_contains(document_text, value) * weight)
+            weights.append(weight)
 
-    available = [
-        (contains_similarity(document_text, value), weight)
-        for value, weight in values
-        if value
-    ]
-
-    if not available:
+    if not weights:
         return 0.0
-
-    weight_sum = sum(weight for _, weight in available)
-    return sum(score * weight for score, weight in available) / weight_sum
+    return sum(scores) / sum(weights)
 
 
 def score_candidate(
     document: IncomingDocument,
     candidate: Candidate,
 ) -> ScoreBreakdown:
-    """Bewertet einen Kandidaten; total = Matching-Confidence-Grundlage."""
-    breakdown = ScoreBreakdown()
+    """Einen Kandidaten bewerten → total = Matching-Confidence."""
+    result = ScoreBreakdown()
     text = document.text
 
-    if document.order_number:
-        if normalize(document.order_number) == normalize(candidate.erf_nr):
-            breakdown.order_number = 1.0
-            breakdown.reasons.append("Auftragsnummer stimmt exakt überein.")
+    # 1) Auftragsnummer / ErfNr
+    if document.order_number and normalize(document.order_number) == normalize(
+        candidate.erf_nr
+    ):
+        result.order_number = 1.0
+        result.reasons.append("Auftragsnummer stimmt überein.")
 
+    # 2) Referenz
     if candidate.referenz:
-        breakdown.reference = contains_similarity(text, candidate.referenz)
-        if breakdown.reference > 0:
-            breakdown.reasons.append("Referenz wurde im Dokument gefunden.")
+        result.reference = text_contains(text, candidate.referenz)
+        if result.reference > 0:
+            result.reasons.append("Referenz im Dokument gefunden.")
 
-    breakdown.sender = _address_score(
+    # 3) Absender
+    result.sender = address_score(
         text,
         candidate.sender_name,
         candidate.sender_street,
         candidate.sender_plz,
         candidate.sender_city,
     )
-    if breakdown.sender > 0:
-        breakdown.reasons.append(
-            f"Absenderinformationen passen (Score {breakdown.sender:.2f})."
-        )
+    if result.sender > 0:
+        result.reasons.append(f"Absender passt ({result.sender:.2f}).")
 
-    breakdown.receiver = _address_score(
+    # 4) Empfänger
+    result.receiver = address_score(
         text,
         candidate.receiver_name,
         candidate.receiver_street,
         candidate.receiver_plz,
         candidate.receiver_city,
     )
-    if breakdown.receiver > 0:
-        breakdown.reasons.append(
-            f"Empfängerinformationen passen (Score {breakdown.receiver:.2f})."
-        )
+    if result.receiver > 0:
+        result.reasons.append(f"Empfänger passt ({result.receiver:.2f}).")
 
-    breakdown.document_type = document_type_score(
-        document.document_type,
-        candidate.typ,
-    )
+    # 5) Dokumenttyp (nur wenn DB-Typ exakt gleich)
+    if document.document_type and candidate.typ:
+        if normalize(document.document_type) == normalize(candidate.typ):
+            result.document_type = 1.0
 
-    breakdown.total = round(
-        breakdown.order_number * WEIGHT_ORDER_NUMBER
-        + breakdown.reference * WEIGHT_REFERENCE
-        + breakdown.sender * WEIGHT_SENDER
-        + breakdown.receiver * WEIGHT_RECEIVER
-        + breakdown.document_type * WEIGHT_DOCUMENT_TYPE,
+    result.total = round(
+        result.order_number * WEIGHT_ORDER
+        + result.reference * WEIGHT_REFERENCE
+        + result.sender * WEIGHT_SENDER
+        + result.receiver * WEIGHT_RECEIVER
+        + result.document_type * WEIGHT_TYPE,
         3,
     )
-
-    return breakdown
-
-
-def document_type_score(
-    document_type: str | None,
-    db_type: str | None,
-) -> float:
-    """Vergleicht Dokumenttyp und DB-Typ (aktuell nur exakt)."""
-    if not document_type or not db_type:
-        return 0.0
-
-    return 1.0 if normalize(document_type) == normalize(db_type) else 0.0
+    return result

@@ -1,4 +1,4 @@
-"""CLI-Einstieg: Scan-Ordner verarbeiten und Kurzüberblick ausgeben."""
+"""CLI: PDFs im Scan-Ordner auslesen und kurz anzeigen."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from extraction.pipeline import extract_from_directory
 
 
 def _preview(text: str, max_len: int = 120) -> str:
+    """Kurzer Textausschnitt für die Konsole."""
     compact = " ".join(text.split())
     if len(compact) <= max_len:
         return compact
@@ -29,15 +30,10 @@ def main() -> int:
         documents = extract_from_directory(settings)
     except FileNotFoundError as exc:
         print(f"Fehler: {exc}", file=sys.stderr)
-        print(
-            "Lege PDFs in den Scan-Ordner oder passe SCAN_DIRECTORY in .env an.",
-            file=sys.stderr,
-        )
         return 1
 
     if not documents:
         print("Keine PDF-Dateien gefunden.")
-        print("Bitte Scans nach sample_scans/ kopieren (nur .pdf, nicht rekursiv).")
         return 0
 
     for doc in documents:

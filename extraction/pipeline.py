@@ -1,4 +1,4 @@
-"""Orchestrierung der Extraktions-Pipeline für einzelne PDFs und Ordner."""
+"""Pipeline: PDF → Text → Typ → Nummer → IncomingDocument."""
 
 from __future__ import annotations
 
@@ -12,19 +12,19 @@ from extraction.pdf_text import extract_direct_text
 
 
 def list_pdf_files(directory: Path) -> list[Path]:
-    """Listet rekursiv alle .pdf-Dateien im Ordner und Unterordnern (sortiert)."""
+    """Alle PDF-Dateien im Ordner (auch Unterordner), sortiert."""
     if not directory.is_dir():
         raise FileNotFoundError(f"Scan-Verzeichnis nicht gefunden: {directory}")
 
-    return sorted(
-        path
-        for path in directory.rglob("*.pdf")
-        if path.is_file()
-    )
+    pdfs = []
+    for path in directory.rglob("*.pdf"):
+        if path.is_file():
+            pdfs.append(path)
+    return sorted(pdfs)
 
 
 def extract_single_document(path: Path | str, settings: Settings) -> IncomingDocument:
-    """Verarbeitet ein einzelnes PDF und liefert ein IncomingDocument."""
+    """Ein PDF auslesen und als IncomingDocument zurückgeben."""
     pdf_path = Path(path).resolve()
     notes: list[str] = []
 
@@ -33,30 +33,28 @@ def extract_single_document(path: Path | str, settings: Settings) -> IncomingDoc
     if pdf_path.suffix.lower() != ".pdf":
         raise ValueError(f"Keine PDF-Datei: {pdf_path}")
 
-    direct_text = extract_direct_text(pdf_path)
-    notes.append(f"Direkter Text: {len(direct_text)} Zeichen")
-
+    # 1) Text direkt aus der PDF
+    text = extract_direct_text(pdf_path)
+    notes.append(f"Direkter Text: {len(text)} Zeichen")
     used_ocr = False
-    text = direct_text
 
-    if len(direct_text) < settings.min_direct_text_length:
-        notes.append(
-            f"Unter MIN_DIRECT_TEXT_LENGTH ({settings.min_direct_text_length}) → OCR"
-        )
+    # 2) Zu wenig Text? → OCR
+    if len(text) < settings.min_direct_text_length:
+        notes.append("Zu wenig Text → OCR")
         try:
             text = extract_text_via_ocr(pdf_path, language=settings.ocr_language)
             used_ocr = True
-            notes.append(f"OCR-Text: {len(text)} Zeichen (lang={settings.ocr_language})")
-        except Exception as exc:  # noqa: BLE001 – Pipeline soll robust weiterlaufen
+            notes.append(f"OCR-Text: {len(text)} Zeichen")
+        except Exception as exc:  # noqa: BLE001
             notes.append(f"OCR fehlgeschlagen: {exc}")
-            text = direct_text
     else:
         notes.append("OCR nicht nötig")
 
-    document_type, _type_confidence = classify_document_type(text)
+    # 3) Typ und Nummer
+    document_type = classify_document_type(text)
     notes.append(f"Klassifikation: {document_type}")
 
-    order_number, _order_confidence = find_order_number(text)
+    order_number = find_order_number(text)
     if order_number:
         notes.append(f"Auftragsnummer: {order_number}")
     else:
@@ -73,6 +71,8 @@ def extract_single_document(path: Path | str, settings: Settings) -> IncomingDoc
 
 
 def extract_from_directory(settings: Settings) -> list[IncomingDocument]:
-    """Verarbeitet alle PDFs im konfigurierten Scan-Verzeichnis (nur lesen)."""
-    pdfs = list_pdf_files(settings.scan_directory)
-    return [extract_single_document(pdf, settings) for pdf in pdfs]
+    """Alle PDFs im Scan-Ordner verarbeiten (nur lesen)."""
+    results = []
+    for pdf in list_pdf_files(settings.scan_directory):
+        results.append(extract_single_document(pdf, settings))
+    return results

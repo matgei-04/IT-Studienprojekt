@@ -1,4 +1,4 @@
-"""OCR-Fallback mit Tesseract für gescannte bzw. textarme PDFs."""
+"""OCR-Fallback: PDF-Seiten als Bild lesen (Tesseract)."""
 
 from __future__ import annotations
 
@@ -10,22 +10,31 @@ from PIL import Image
 
 
 def extract_text_via_ocr(pdf_path: Path, language: str = "deu") -> str:
-    """Rendert PDF-Seiten als Bilder und erkennt Text mit Tesseract."""
-    page_texts: list[str] = []
-    # 2x Zoom für bessere OCR-Qualität bei typischen Scan-Auflösungen
-    matrix = fitz.Matrix(2.0, 2.0)
+    """Seite → Bild → Text mit Tesseract."""
+    page_texts = []
+    # 2x Vergrößerung = bessere Erkennung
+    zoom = fitz.Matrix(2.0, 2.0)
 
     with fitz.open(pdf_path) as document:
         for page in document:
-            pixmap = page.get_pixmap(matrix=matrix, alpha=False)
-            image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
+            pixmap = page.get_pixmap(matrix=zoom, alpha=False)
+            image = Image.frombytes(
+                "RGB",
+                (pixmap.width, pixmap.height),
+                pixmap.samples,
+            )
             text = pytesseract.image_to_string(image, lang=language) or ""
-            page_texts.append(text.strip())
+            if text.strip():
+                page_texts.append(text.strip())
 
-    combined = "\n".join(part for part in page_texts if part)
-    return _normalize_whitespace(combined)
+    return _clean_text("\n".join(page_texts))
 
 
-def _normalize_whitespace(text: str) -> str:
-    lines = [" ".join(line.split()) for line in text.splitlines()]
-    return "\n".join(line for line in lines if line).strip()
+def _clean_text(text: str) -> str:
+    """Doppelte Leerzeichen entfernen, leere Zeilen weglassen."""
+    clean_lines = []
+    for line in text.splitlines():
+        line = " ".join(line.split())
+        if line:
+            clean_lines.append(line)
+    return "\n".join(clean_lines).strip()

@@ -1,66 +1,75 @@
-"""Erkennung von Auftrags-/Sendungsnummern (ErfNr) im Dokumenttext."""
+"""Auftragsnummer (ErfNr) im Text finden."""
 
 from __future__ import annotations
 
 import re
 
-# Labels, die typischerweise vor der Nummer stehen (bevorzugt)
-_LABEL_PATTERN = re.compile(
-    r"(?:"
-    r"auftrags(?:nr\.?|nummer|nr)|"
-    r"sendungs(?:nr\.?|nummer|nr)|"
-    r"sendung|"
-    r"erfnr\.?|"
-    r"erf[\.\s-]?nr\.?|"
-    r"auftrag|"
-    r"referenz(?:nr\.?|nummer)?"
-    r")"
-    r"\s*[:.\-]?\s*"
-    r"(\d{3,6})",
-    re.IGNORECASE,
-)
+# Wörter, die oft VOR der Nummer stehen (Reihenfolge = Priorität)
+LABELS = [
+    "erfassungsnummer",
+    "erfnr",
+    "erf-nr",
+    "erf nr",
+    "auftragsnummer",
+    "auftragsnr",
+    "auftrags nr",
+    "sendungsnummer",
+    "sendungsnr",
+    "sendung",
+    "auftrag",
+    "referenznummer",
+    "referenznr",
+    "referenz",
+]
 
-# Fallback: isolierte 3–6-stellige Zahl (Wortgrenzen)
-_FALLBACK_NUMBER = re.compile(r"(?<!\d)(\d{3,6})(?!\d)")
-
-# Typische False Positives: Jahreszahlen, PLZ (D), Telefonfragmente grob
-_YEAR_RANGE = range(1990, 2036)
-_GERMAN_PLZ = re.compile(r"^\d{5}$")
+# Beliebige 3–6-stellige Zahl im Text
+ANY_NUMBER = re.compile(r"(?<!\d)(\d{3,6})(?!\d)")
 
 
-def find_order_number(text: str) -> tuple[str | None, float]:
+def find_order_number(text: str) -> str | None:
     """
-    Sucht eine Auftrags-/Sendungsnummer im Text.
+    Sucht eine Auftragsnummer.
 
-    Bevorzugt Nummern hinter Labels; filtert Jahr und PLZ möglichst aus.
-    Rückgabe: (Nummer oder None, confidence).
+    1) Zahl direkt hinter einem Label (z.B. ErfNr: 815)
+    2) sonst erste passende Zahl im Text (ohne Jahr/PLZ)
     """
     if not text.strip():
-        return None, 0.0
+        return None
 
-    labeled = _LABEL_PATTERN.search(text)
-    if labeled:
-        candidate = labeled.group(1)
-        # Mit Label: nur Jahreszahlen ausschließen (5-stellig kann ErfNr sein)
-        if _is_plausible_order_number(candidate, reject_plz_like=False):
-            return candidate, 0.9
+    # Schritt 1: hinter Labels suchen
+    for label in LABELS:
+        pattern = re.compile(
+            re.escape(label) + r"[\s:.\-]*(\d{3,6})",
+            re.IGNORECASE,
+        )
+        match = pattern.search(text)
+        if match:
+            number = match.group(1)
+            if _is_valid_number(number, reject_plz=False):
+                return number
 
-    for match in _FALLBACK_NUMBER.finditer(text):
-        candidate = match.group(1)
-        # Ohne Label: 5-stellige Zahlen oft PLZ → vorsichtig ausschließen
-        if _is_plausible_order_number(candidate, reject_plz_like=True):
-            return candidate, 0.45
+    # Schritt 2: Fallback – erste plausible Zahl
+    for match in ANY_NUMBER.finditer(text):
+        number = match.group(1)
+        if _is_valid_number(number, reject_plz=True):
+            return number
 
-    return None, 0.0
+    return None
 
 
-def _is_plausible_order_number(value: str, *, reject_plz_like: bool) -> bool:
-    """Schließt typische Non-Order-Zahlen aus (Jahre, optional PLZ-ähnlich)."""
-    if not value.isdigit():
+def _is_valid_number(number: str, reject_plz: bool) -> bool:
+    """Filtert Jahreszahlen und (optional) 5-stellige PLZ heraus."""
+    if not number.isdigit():
         return False
-    as_int = int(value)
-    if len(value) == 4 and as_int in _YEAR_RANGE:
+
+    value = int(number)
+
+    # typische Jahre, z.B. 2024
+    if len(number) == 4 and 1990 <= value <= 2035:
         return False
-    if reject_plz_like and _GERMAN_PLZ.match(value):
+
+    # deutsche PLZ oft 5-stellig – nur im Fallback aussortieren
+    if reject_plz and len(number) == 5:
         return False
+
     return True
