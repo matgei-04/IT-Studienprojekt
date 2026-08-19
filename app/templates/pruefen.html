@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% from "_macros.html" import confidence_badge %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1>Zuordnung prüfen</h1>
+    <p class="page-subtitle">{{ item.filename }}</p>
+  </div>
+  <a class="btn btn-secondary" href="/zuordnungen">← Zurück zur Liste</a>
+</div>
+
+{% if item.note %}
+<div class="banner banner--warning">{{ item.note }}</div>
+{% endif %}
+
+{% if error %}
+<div class="banner banner--danger">{{ error }}</div>
+{% endif %}
+
+{% if confirmed %}
+<div class="banner banner--success">
+  Zuordnung bestätigt: Auftrag {{ confirmed.ErfNr }} am {{ confirmed.BestaetigtAm|de_datetime }}{% if confirmed.BestaetigtVon %} von {{ confirmed.BestaetigtVon }}{% endif %}.
+</div>
+{% endif %}
+
+<div class="dashboard-grid">
+  <section class="card">
+    <div class="card-header"><h2>Dokument</h2></div>
+    <dl class="detail-list">
+      <dt>Dateiname</dt><dd>{{ item.filename }}</dd>
+      <dt>Eingegangen</dt><dd>{{ item.received_at|de_datetime }}</dd>
+      <dt>Erkannter Typ</dt><dd>{{ item.document_type }}</dd>
+      <dt>Erkannte Auftragsnummer</dt><dd>{{ item.order_number or "–" }}</dd>
+      <dt>Sicherheit</dt><dd>{{ confidence_badge(item) }}</dd>
+    </dl>
+
+    <div class="pdf-preview">
+      <iframe src="/dokument/datei?doc={{ item.path|urlencode }}&mode=inline" title="PDF-Vorschau: {{ item.filename }}"></iframe>
+    </div>
+    <div class="detail-actions">
+      <a class="btn btn-secondary btn-small" href="/dokument/datei?doc={{ item.path|urlencode }}&mode=inline" target="_blank">PDF öffnen ↗</a>
+      <a class="btn btn-secondary btn-small" href="/dokument/datei?doc={{ item.path|urlencode }}&mode=download">Herunterladen</a>
+    </div>
+  </section>
+
+  <div class="side-column">
+    <section class="card">
+      <div class="card-header"><h2>Vorgeschlagener Auftrag</h2></div>
+      {% if candidate %}
+      <dl class="detail-list">
+        <dt>ErfNr</dt><dd>{{ candidate.erf_nr }}</dd>
+        <dt>Absender</dt><dd>{{ candidate.sender_name or "–" }}</dd>
+        <dt>Empfänger</dt><dd>{{ candidate.receiver_name or "–" }}</dd>
+        <dt>Referenz</dt><dd>{{ candidate.referenz or "–" }}</dd>
+      </dl>
+      {% else %}
+      <p class="empty-state">Kein Kandidat gefunden.</p>
+      {% endif %}
+    </section>
+
+    <section class="card">
+      <div class="card-header"><h2>Begründung</h2></div>
+      {% if reasons %}
+      <ul class="reason-list">
+        {% for reason in reasons %}
+        <li>{{ reason }}</li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p class="empty-state">Keine Begründungen verfügbar.</p>
+      {% endif %}
+    </section>
+
+    {% if not confirmed %}
+    <section class="card">
+      {% if candidate %}
+      <form method="post" action="/zuordnung/bestaetigen"
+            onsubmit="return confirm('Zuordnung zu Auftrag {{ candidate.erf_nr }} wirklich bestätigen?');">
+        <input type="hidden" name="doc" value="{{ item.path }}">
+        <input type="hidden" name="erf_nr" value="{{ candidate.erf_nr }}">
+        <input type="hidden" name="score" value="{{ item.confidence }}">
+        <input type="hidden" name="document_type" value="{{ item.document_type }}">
+        <button class="btn btn-primary" type="submit">Zuordnung bestätigen</button>
+      </form>
+      {% else %}
+      <p class="hint-text">Kein automatischer Kandidat gefunden. Auftrag manuell suchen und zuordnen:</p>
+      <form method="get" action="/zuordnung/pruefen" class="manual-search-form">
+        <input type="hidden" name="doc" value="{{ item.path }}">
+        <input class="text-input" type="text" name="manual_q" placeholder="Auftragsnummer oder Kunde" value="{{ manual_q or '' }}">
+        <button class="btn btn-secondary btn-small" type="submit">Suchen</button>
+      </form>
+
+      {% if manual_q %}
+        {% if manual_results %}
+        <ul class="manual-result-list">
+          {% for order in manual_results %}
+          <li class="manual-result-row">
+            <div>
+              <div class="cell-primary">{{ order.erf_nr }}</div>
+              <div class="cell-secondary">{{ order.kunde or "–" }}{% if order.beschreibung %} · {{ order.beschreibung }}{% endif %}</div>
+            </div>
+            <form method="post" action="/zuordnung/bestaetigen"
+                  onsubmit="return confirm('Zuordnung zu Auftrag {{ order.erf_nr }} wirklich bestätigen?');">
+              <input type="hidden" name="doc" value="{{ item.path }}">
+              <input type="hidden" name="erf_nr" value="{{ order.erf_nr }}">
+              <input type="hidden" name="document_type" value="{{ item.document_type }}">
+              <button class="btn btn-secondary btn-small" type="submit">Zuordnen</button>
+            </form>
+          </li>
+          {% endfor %}
+        </ul>
+        {% else %}
+        <p class="empty-state">Keine Aufträge gefunden für „{{ manual_q }}“.</p>
+        {% endif %}
+      {% endif %}
+      {% endif %}
+    </section>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>{{ page_title }} – Name</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="sidebar-brand">Name</div>
+    <nav class="sidebar-nav">
+      {% for item in nav_items %}
+      <a class="nav-item {{ 'is-active' if item.key == active_key else '' }}" href="{{ item.path }}">
+        <span class="nav-icon">{{ item.icon|safe }}</span>
+        <span class="nav-label">{{ item.label }}</span>
+      </a>
+      {% endfor %}
+    </nav>
+    <div class="sidebar-bottom">
+      <a class="nav-item {{ 'is-active' if settings_item.key == active_key else '' }}" href="{{ settings_item.path }}">
+        <span class="nav-icon">{{ settings_item.icon|safe }}</span>
+        <span class="nav-label">{{ settings_item.label }}</span>
+      </a>
+    </div>
+  </aside>
+
+  <main class="main">
+    {% block content %}{% endblock %}
+  </main>
+</div>
+</body>
+</html>

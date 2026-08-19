@@ -23,8 +23,14 @@ def list_pdf_files(directory: Path) -> list[Path]:
     return sorted(pdfs)
 
 
-def extract_single_document(path: Path | str, settings: Settings) -> IncomingDocument:
-    """Ein PDF auslesen und als IncomingDocument zurückgeben."""
+def extract_single_document(path: Path | str, settings: Settings, allow_ocr: bool = True) -> IncomingDocument:
+    """Ein PDF auslesen und als IncomingDocument zurückgeben.
+
+    allow_ocr=False überspringt den OCR-Fallback bewusst komplett (auch bei
+    zu wenig direktem Text) – genutzt von der "OCR nach Import starten"-
+    Einstellung. Der Standardwert True ändert nichts am bisherigen Verhalten
+    bestehender Aufrufer (run_extraction.py, run_matching.py, Tests).
+    """
     pdf_path = Path(path).resolve()
     notes: list[str] = []
 
@@ -38,8 +44,10 @@ def extract_single_document(path: Path | str, settings: Settings) -> IncomingDoc
     notes.append(f"Direkter Text: {len(text)} Zeichen")
     used_ocr = False
 
-    # 2) Zu wenig Text? → OCR
-    if len(text) < settings.min_direct_text_length:
+    # 2) Zu wenig Text? → OCR (sofern nicht deaktiviert)
+    if not allow_ocr:
+        notes.append("OCR deaktiviert (Einstellungen)")
+    elif len(text) < settings.min_direct_text_length:
         notes.append("Zu wenig Text → OCR")
         try:
             text = extract_text_via_ocr(pdf_path, language=settings.ocr_language)

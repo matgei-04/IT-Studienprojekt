@@ -4,3 +4,9 @@ Pillow>=10.0.0
 python-dotenv>=1.0.0
 pytest>=8.0.0
 supabase>=2.0.0
+psycopg2-binary>=2.9.0  # für migrations/run_migrations.py (kein ORM im Projekt)
+
+# Desktop-Oberfläche (kein Web-Framework: natives Fenster mit lokalem HTML)
+pywebview>=5.0
+jinja2>=3.1.0
+truststore>=0.9.0

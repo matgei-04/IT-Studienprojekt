@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1>Einstellungen</h1>
+    <p class="page-subtitle">Datenquellen und Verarbeitungsregeln verwalten.</p>
+  </div>
+</div>
+
+{% if warning %}
+<div class="banner banner--warning">{{ warning }}</div>
+{% endif %}
+
+<div class="settings-layout">
+  <nav class="settings-nav">
+    <a class="settings-nav-item {{ 'is-active' if tab == 'datenquellen' else '' }}" href="/einstellungen?tab=datenquellen">Datenquellen</a>
+    <a class="settings-nav-item {{ 'is-active' if tab == 'verarbeitung' else '' }}" href="/einstellungen?tab=verarbeitung">Verarbeitung</a>
+    <a class="settings-nav-item {{ 'is-active' if tab == 'matching' else '' }}" href="/einstellungen?tab=matching">Matching-Regeln</a>
+  </nav>
+
+  <div class="settings-content">
+    {% if tab == 'datenquellen' %}
+      {% if conn_msg %}
+      <div class="banner {{ 'banner--success' if conn_ok == '1' else 'banner--danger' }}">{{ conn_msg }}</div>
+      {% endif %}
+      {% if saved %}<div class="banner banner--success">Einstellungen wurden gespeichert.</div>{% endif %}
+      {% if save_error %}<div class="banner banner--danger">{{ save_error }}</div>{% endif %}
+
+      <section class="card">
+        <div class="card-header"><h2>Datenquellen</h2></div>
+        <ul class="datasource-list">
+          {% for ds in datasources %}
+          <li class="datasource-row">
+            <div class="datasource-main">
+              <div class="datasource-name">{{ ds.name }}</div>
+              <div class="datasource-desc">{{ ds.beschreibung }}</div>
+            </div>
+            <span class="badge badge--{{ ds.status_class }}">{{ ds.status }}</span>
+            <div class="datasource-action">
+              {% if ds.check_action %}
+              <form method="post" action="/einstellungen/verbindung-pruefen">
+                <button class="btn btn-secondary btn-small" type="submit">Verbindung prüfen</button>
+              </form>
+              {% elif ds.link_href %}
+              <a class="btn btn-secondary btn-small" href="{{ ds.link_href }}">{{ ds.link_label }}</a>
+              {% endif %}
+            </div>
+          </li>
+          {% endfor %}
+        </ul>
+      </section>
+
+      <section class="card">
+        <div class="card-header"><h2>Import-Ordner</h2></div>
+        <form method="post" action="/einstellungen/ordner" class="settings-form">
+          <label class="field-label" for="scan_ordner">Ordner, aus dem PDFs automatisch importiert werden</label>
+          <input class="text-input" type="text" id="scan_ordner" name="scan_ordner"
+                 value="{{ einstellungen.scan_ordner or '' }}" placeholder="z. B. C:\Belege\Eingang">
+          <p class="hint-text">Leer lassen, um wieder SCAN_DIRECTORY aus der .env zu verwenden. Der Ordner muss bereits vorhanden sein; bereits importierte Dokumente werden durch eine Änderung nicht rückwirkend verschoben.</p>
+          <button class="btn btn-primary" type="submit">Änderungen speichern</button>
+        </form>
+      </section>
+
+    {% elif tab == 'verarbeitung' %}
+      {% if saved %}<div class="banner banner--success">Einstellungen wurden gespeichert.</div>{% endif %}
+      {% if save_error %}<div class="banner banner--danger">{{ save_error }}</div>{% endif %}
+
+      <section class="card">
+        <div class="card-header"><h2>Automatische Verarbeitung</h2></div>
+        <form method="post" action="/einstellungen/verarbeitung" class="settings-form">
+          <label class="toggle-row">
+            <input type="checkbox" name="ocr_aktiv" {{ "checked" if einstellungen.ocr_aktiv else "" }}>
+            <span>
+              <strong>OCR nach Import starten</strong>
+              <span class="hint-text">Texterkennung für gescannte/textarme PDFs. Ist diese Option deaktiviert, wird bei neuen Importen kein OCR-Fallback mehr ausgeführt – nur eingebetteter PDF-Text wird gelesen.</span>
+            </span>
+          </label>
+
+          <label class="toggle-row">
+            <input type="checkbox" name="matching_aktiv" {{ "checked" if einstellungen.matching_aktiv else "" }}>
+            <span>
+              <strong>Matching-Vorschlag nach erfolgreicher Textextraktion erstellen</strong>
+              <span class="hint-text">Ist diese Option deaktiviert, wird nach dem Import kein Auftragsvorschlag mehr berechnet; Dokumente erscheinen als „Matching deaktiviert“.</span>
+            </span>
+          </label>
+
+          <div class="toggle-row toggle-row--fixed">
+            <span class="fixed-check" aria-hidden="true">✓</span>
+            <span>
+              <strong>Manuelle Bestätigung erforderlich</strong>
+              <span class="hint-text">Eine Zuordnung wird erst dauerhaft gespeichert, wenn ein Nutzer sie auf der Prüfseite bestätigt. Diese Sicherheitsregel ist fest im System verankert und nicht deaktivierbar.</span>
+            </span>
+          </div>
+
+          <p class="hint-text">Bereits importierte Dokumente werden durch eine Änderung nicht rückwirkend neu verarbeitet.</p>
+
+          <button class="btn btn-primary" type="submit">Änderungen speichern</button>
+        </form>
+      </section>
+
+    {% elif tab == 'matching' %}
+      {% if saved %}<div class="banner banner--success">Einstellungen wurden gespeichert.</div>{% endif %}
+      {% if save_error %}<div class="banner banner--danger">{{ save_error }}</div>{% endif %}
+
+      <section class="card">
+        <div class="card-header"><h2>Schwelle für hohe Übereinstimmung</h2></div>
+        <form method="post" action="/einstellungen/matching" class="settings-form">
+          <label class="field-label" for="schwelle">Ab diesem Confidence-Score (%) gilt ein Vorschlag als „Hohe Übereinstimmung“</label>
+          <input class="schwelle-input" type="number" id="schwelle" name="schwelle" min="0" max="100" step="1" value="{{ einstellungen.schwelle_hohe_uebereinstimmung }}" required>
+          <p class="hint-text">Die Schwelle beeinflusst die Kennzeichnung von Vorschlägen, nicht die Pflicht zur Bestätigung. Bereits gespeicherte Confidence-Scores werden nicht verändert – nur ihre Anzeige-Kategorie auf Dashboard, Zuordnungen, Dokumenten und Auswertungen.</p>
+          <button class="btn btn-primary" type="submit">Änderungen speichern</button>
+        </form>
+      </section>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

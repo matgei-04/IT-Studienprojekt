@@ -121,12 +121,12 @@ class CandidateRepository:
         if art == "1":
             candidate.sender_name = row.get("Name1")
             candidate.sender_street = row.get("Strasse")
-            candidate.sender_plz = row.get("PLZ")
+            candidate.sender_plz = row.get("Plz")
             candidate.sender_city = row.get("Ort")
         elif art == "2":
             candidate.receiver_name = row.get("Name1")
             candidate.receiver_street = row.get("Strasse")
-            candidate.receiver_plz = row.get("PLZ")
+            candidate.receiver_plz = row.get("Plz")
             candidate.receiver_city = row.get("Ort")
 
     @staticmethod

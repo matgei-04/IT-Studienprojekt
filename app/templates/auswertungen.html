@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1>Auswertungen</h1>
+    <p class="page-subtitle">Überblick über Qualität und Geschwindigkeit der Dokumentenzuordnung.</p>
+  </div>
+  <div class="header-actions">
+    <form method="get" class="range-form">
+      <select name="range" onchange="this.form.submit()">
+        {% for key, label in range_options %}
+        <option value="{{ key }}" {{ "selected" if key == range_key else "" }}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </form>
+    {% if has_range_data %}
+    <a class="btn btn-secondary" href="/auswertungen/export.csv?range={{ range_key }}">Bericht exportieren</a>
+    {% endif %}
+  </div>
+</div>
+
+{% if warning %}
+<div class="banner banner--warning">{{ warning }}</div>
+{% endif %}
+
+{% if not has_any_data %}
+<section class="card">
+  <p class="empty-state">Noch keine Dokumente verarbeitet. Sobald Belege importiert wurden, erscheinen hier Auswertungen.</p>
+</section>
+{% else %}
+
+<div class="kpi-grid">
+  <div class="kpi-card">
+    <span class="kpi-label">Dokumente verarbeitet</span>
+    <span class="kpi-value">{{ kpis.verarbeitet }}</span>
+  </div>
+  <div class="kpi-card">
+    <span class="kpi-label">Bestätigte Zuordnungen</span>
+    <span class="kpi-value kpi-value--success">{{ kpis.bestaetigt }}</span>
+  </div>
+  <div class="kpi-card">
+    <span class="kpi-label">Manuell geprüft</span>
+    <span class="kpi-value kpi-value--warning">{{ kpis.manuell_geprueft }}</span>
+  </div>
+  <div class="kpi-card">
+    <span class="kpi-label">Nicht zuordenbar</span>
+    <span class="kpi-value kpi-value--danger">{{ kpis.nicht_zuordenbar }}</span>
+  </div>
+</div>
+
+{% if not has_range_data %}
+<section class="card">
+  <p class="empty-state">Keine Dokumente im gewählten Zeitraum.</p>
+</section>
+{% else %}
+
+<div class="dashboard-grid">
+  <section class="card">
+    <div class="card-header"><h2>Entwicklung der Zuordnungsqualität</h2></div>
+    {% if trend_bars %}
+    <p class="hint-text" style="margin: 0 0 12px;">Anteil bestätigter Zuordnungen an allen im Zeitraum gematchten Dokumenten.</p>
+    <svg viewBox="0 0 100 44" preserveAspectRatio="none" class="trend-chart">
+      {% for bar in trend_bars %}
+      <rect x="{{ bar.x }}" y="{{ bar.y }}" width="{{ bar.width }}" height="{{ bar.height }}" rx="1" class="trend-bar"></rect>
+      {% endfor %}
+    </svg>
+    <div class="trend-labels">
+      {% for bar in trend_bars %}
+      <span class="trend-label">{{ bar.label }}<br><strong>{{ bar.pct }}%</strong></span>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p class="empty-state">Noch zu wenige gematchte Dokumente im Zeitraum für einen aussagekräftigen Verlauf.</p>
+    {% endif %}
+  </section>
+
+  <div class="side-column">
+    <section class="card">
+      <div class="card-header"><h2>Confidence-Verteilung</h2></div>
+      {% if confidence.gesamt > 0 %}
+      <div class="status-list">
+        <div class="status-row"><span class="status-label">Hoch (≥ 80 %)</span><span class="status-count">{{ confidence.hoch }}</span></div>
+        <div class="progress-track"><div class="progress-fill progress-fill--success" style="width: {{ (confidence.hoch / confidence.gesamt) * 100 }}%"></div></div>
+
+        <div class="status-row"><span class="status-label">Mittel (50–79 %)</span><span class="status-count">{{ confidence.mittel }}</span></div>
+        <div class="progress-track"><div class="progress-fill progress-fill--warning" style="width: {{ (confidence.mittel / confidence.gesamt) * 100 }}%"></div></div>
+
+        <div class="status-row"><span class="status-label">Niedrig (&lt; 50 %)</span><span class="status-count">{{ confidence.niedrig }}</span></div>
+        <div class="progress-track"><div class="progress-fill progress-fill--danger" style="width: {{ (confidence.niedrig / confidence.gesamt) * 100 }}%"></div></div>
+      </div>
+      {% if confidence.ohne_score > 0 %}
+      <p class="hint-text">{{ confidence.ohne_score }} Dokument(e) ohne Sicherheits-Score (z. B. technischer Fehler) – nicht in der Verteilung berücksichtigt.</p>
+      {% endif %}
+      {% else %}
+      <p class="empty-state">Keine Dokumente mit Sicherheits-Score im Zeitraum.</p>
+      {% endif %}
+    </section>
+
+    <section class="card">
+      <div class="card-header"><h2>Häufigste Prüfungsgründe</h2></div>
+      <p class="empty-state">Prüfungsgründe werden noch nicht strukturiert erfasst.</p>
+    </section>
+  </div>
+</div>
+
+{% endif %}
+{% endif %}
+{% endblock %}

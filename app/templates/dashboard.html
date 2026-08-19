@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% from "_macros.html" import review_table %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1>Übersicht</h1>
+    <p class="page-subtitle">Behalte alle neuen Belege und offenen Zuordnungen im Blick.</p>
+  </div>
+  <a class="btn btn-primary" href="/eingang">Dokumente importieren</a>
+</div>
+
+{% if warning %}
+<div class="banner banner--warning">{{ warning }}</div>
+{% endif %}
+
+<div class="kpi-grid">
+  <a class="kpi-card" href="/zuordnungen">
+    <span class="kpi-label">Neu eingegangen</span>
+    <span class="kpi-value">{{ kpis.neu }}</span>
+  </a>
+  <a class="kpi-card" href="/zuordnungen?filter=automatisch">
+    <span class="kpi-label">Automatisch zugeordnet</span>
+    <span class="kpi-value kpi-value--success">{{ kpis.automatisch }}</span>
+  </a>
+  <a class="kpi-card" href="/zuordnungen?filter=pruefung">
+    <span class="kpi-label">Prüfung erforderlich</span>
+    <span class="kpi-value kpi-value--warning">{{ kpis.pruefung }}</span>
+  </a>
+  <a class="kpi-card" href="/zuordnungen?filter=nicht_zuordenbar">
+    <span class="kpi-label">Nicht zuordenbar</span>
+    <span class="kpi-value kpi-value--danger">{{ kpis.nicht_zuordenbar }}</span>
+  </a>
+</div>
+
+<div class="dashboard-grid">
+  <section class="card">
+    <div class="card-header">
+      <h2>Priorisierte Prüfungen</h2>
+    </div>
+    {{ review_table(items, cols, "Aktuell keine offenen Prüfungen – alles erledigt.", view_all_href="/zuordnungen") }}
+  </section>
+
+  <div class="side-column">
+    <section class="card">
+      <div class="card-header">
+        <h2>Verarbeitung heute</h2>
+      </div>
+      <div class="status-list">
+        <div class="status-row">
+          <span class="status-label">Neu eingegangen</span>
+          <span class="status-count">{{ today.neu }}</span>
+        </div>
+        <div class="progress-track"><div class="progress-fill progress-fill--neutral" style="width: {{ (today.neu / max_today) * 100 if max_today else 0 }}%"></div></div>
+
+        <div class="status-row">
+          <span class="status-label">Automatisch zugeordnet</span>
+          <span class="status-count">{{ today.automatisch }}</span>
+        </div>
+        <div class="progress-track"><div class="progress-fill progress-fill--success" style="width: {{ (today.automatisch / max_today) * 100 if max_today else 0 }}%"></div></div>
+
+        <div class="status-row">
+          <span class="status-label">In Prüfung</span>
+          <span class="status-count">{{ today.pruefung }}</span>
+        </div>
+        <div class="progress-track"><div class="progress-fill progress-fill--warning" style="width: {{ (today.pruefung / max_today) * 100 if max_today else 0 }}%"></div></div>
+
+        <div class="status-row">
+          <span class="status-label">Nicht zuordenbar</span>
+          <span class="status-count">{{ today.nicht_zuordenbar }}</span>
+        </div>
+        <div class="progress-track"><div class="progress-fill progress-fill--danger" style="width: {{ (today.nicht_zuordenbar / max_today) * 100 if max_today else 0 }}%"></div></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-header">
+        <h2>Letzte Aktivitäten</h2>
+      </div>
+      {% if recent_events %}
+      <ul class="activity-list">
+        {% for ts, label in recent_events %}
+        <li class="activity-item">
+          <span class="activity-time">{{ ts|de_datetime }}</span>
+          <span class="activity-label">{{ label }}</span>
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p class="empty-state">Keine Aktivitätshistorie verfügbar.</p>
+      {% endif %}
+    </section>
+  </div>
+</div>
+{% endblock %}
