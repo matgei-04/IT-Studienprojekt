@@ -22,11 +22,11 @@ cp .env.example .env   # falls noch keine .env existiert
 ```
 
 PDFs **nur lesen** – Dateien werden weder verschoben noch gelöscht.
-Lege Beispieldokumente in `sample_scans/` (auch Unterordner, nur `.pdf`).
+Lege eingehende Dokumente in den Ordner aus `SCAN_DIRECTORY` (auch Unterordner, nur `.pdf`).
 
 In `.env` können zusätzlich gesetzt werden:
 - `SCAN_DIRECTORY`, `MIN_DIRECT_TEXT_LENGTH`, `OCR_LANGUAGE` (Extraktion)
-- `DATABASE_URL` (für Matching/Persistence / Supabase – lokal, nicht committen)
+- `SUPABASE_URL`, `SUPABASE_KEY` (Matching / Persistenz – lokal, nicht committen)
 
 ## Start (CLI)
 
@@ -45,7 +45,7 @@ from extraction import extract_from_directory, extract_single_document
 
 settings = load_settings()  # liest .env
 docs = extract_from_directory(settings)
-# oder: doc = extract_single_document("sample_scans/beispiel.pdf", settings)
+# oder: doc = extract_single_document("eingang/beispiel.pdf", settings)
 ```
 
 ### `IncomingDocument` (pro PDF)
@@ -65,8 +65,10 @@ docs = extract_from_directory(settings)
 2. Eingebetteten PDF-Text lesen (PyMuPDF)
 3. Wenn Textlänge &lt; `MIN_DIRECT_TEXT_LENGTH` → OCR (Tesseract)
 4. Dokumenttyp per Schlüsselwörter
-5. Auftragsnummer per Regex (Labels wie ErfNr / Auftragsnr. bevorzugt)
+5. Auftragsnummer nur hinter Labels (Auftragsnummer / Auftrags-Nr. / ErfNr / …)
 6. `IncomingDocument` zurückgeben
+
+Ohne erkannte Auftragsnummer gibt es beim Matching **keinen** automatischen Vorschlag.
 
 ## Tests
 

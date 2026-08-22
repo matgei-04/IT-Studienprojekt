@@ -11,18 +11,6 @@ _ICON_UEBERSICHT = (
     '<rect x="3" y="14" width="8" height="7" rx="1.5"/>'
     '</svg>'
 )
-_ICON_EINGANG = (
-    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">'
-    '<path d="M4 4h16v10.5L17 20H7l-3-5.5z"/>'
-    '<path d="M4 14.5h5l1.2 2h3.6l1.2-2h5"/>'
-    '</svg>'
-)
-_ICON_ZUORDNUNGEN = (
-    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">'
-    '<circle cx="12" cy="12" r="9"/>'
-    '<path d="M8 12.5l2.5 2.5L16 9.5" stroke-linecap="round" stroke-linejoin="round"/>'
-    '</svg>'
-)
 _ICON_AUFTRAEGE = (
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">'
     '<rect x="3" y="7" width="18" height="13" rx="1.5"/>'
@@ -52,10 +40,8 @@ _ICON_EINSTELLUNGEN = (
 # Hauptnavigation (obere Gruppe der Sidebar).
 NAV_ITEMS: list[dict] = [
     {"key": "uebersicht", "label": "Übersicht", "path": "/", "icon": _ICON_UEBERSICHT},
-    {"key": "eingang", "label": "Eingang", "path": "/eingang", "icon": _ICON_EINGANG},
-    {"key": "zuordnungen", "label": "Zuordnungen", "path": "/zuordnungen", "icon": _ICON_ZUORDNUNGEN},
+    {"key": "dokumente", "label": "Dokumentenzuordnung", "path": "/dokumente", "icon": _ICON_DOKUMENTE},
     {"key": "auftraege", "label": "Aufträge", "path": "/auftraege", "icon": _ICON_AUFTRAEGE},
-    {"key": "dokumente", "label": "Dokumente", "path": "/dokumente", "icon": _ICON_DOKUMENTE},
     {"key": "auswertungen", "label": "Auswertungen", "path": "/auswertungen", "icon": _ICON_AUSWERTUNGEN},
 ]
 

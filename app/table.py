@@ -12,13 +12,6 @@ SORTABLE_COLUMNS = [
     ("confidence", "Sicherheit"),
 ]
 
-# Spalten der "Letzte Importe"-Tabelle auf der Eingang-Seite.
-IMPORT_SORTABLE_COLUMNS = [
-    ("document", "Dokument"),
-    ("date", "Eingegangen"),
-    ("status", "Status"),
-]
-
 # Spalten der Auftragsliste.
 ORDER_SORTABLE_COLUMNS = [
     ("erf_nr", "Auftragsnummer"),
@@ -29,14 +22,13 @@ ORDER_SORTABLE_COLUMNS = [
     ("datum", "Erstellt"),
 ]
 
-# Spalten des Dokumente-Archivs.
+# Spalten der Dokumentliste.
 DOCUMENT_SORTABLE_COLUMNS = [
-    ("dateiname", "Dateiname"),
+    ("dateiname", "Dokument"),
     ("datum", "Belegdatum"),
-    ("betrag", "Betrag"),
-    ("auftrag", "Zugeordneter Auftrag"),
-    ("confidence", "Sicherheit"),
+    ("auftrag", "Auftrag"),
     ("status", "Status"),
+    ("confidence", "Sicherheit"),
 ]
 
 

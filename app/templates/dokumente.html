@@ -4,38 +4,30 @@
 {% block content %}
 <div class="page-header">
   <div>
-    <h1>Dokumente</h1>
-    <p class="page-subtitle">Durchsuche alle importierten Belege und ihre Zuordnung.</p>
+    <h1>Dokumentenzuordnung</h1>
   </div>
-  <a class="btn btn-primary" href="/eingang">Dokumente importieren</a>
+  <div class="open-count-badge">{{ open_count }} offene Prüfung{{ "en" if open_count != 1 else "" }}</div>
 </div>
 
 {% if warning %}
 <div class="banner banner--warning">{{ warning }}</div>
 {% endif %}
+{% if error %}
+<div class="banner banner--danger">{{ error }}</div>
+{% endif %}
 
-<div class="kpi-grid">
-  <a class="kpi-card {{ 'is-active' if not status_filter else '' }}" href="/dokumente">
-    <span class="kpi-label">Alle</span>
-    <span class="kpi-value">{{ status_counts.alle }}</span>
-  </a>
-  <a class="kpi-card {{ 'is-active' if status_filter == 'zugeordnet' else '' }}" href="/dokumente?status=zugeordnet">
-    <span class="kpi-label">Zugeordnet</span>
-    <span class="kpi-value kpi-value--success">{{ status_counts.zugeordnet }}</span>
-  </a>
-  <a class="kpi-card {{ 'is-active' if status_filter == 'pruefung' else '' }}" href="/dokumente?status=pruefung">
-    <span class="kpi-label">Prüfung erforderlich</span>
-    <span class="kpi-value kpi-value--warning">{{ status_counts.pruefung }}</span>
-  </a>
-  <a class="kpi-card {{ 'is-active' if status_filter == 'nicht_zuordenbar' else '' }}" href="/dokumente?status=nicht_zuordenbar">
-    <span class="kpi-label">Nicht zuordenbar</span>
-    <span class="kpi-value kpi-value--danger">{{ status_counts.nicht_zuordenbar }}</span>
-  </a>
+<div class="toolbar">
+  <div class="filter-pills">
+    <a class="pill {{ 'is-active' if not status_filter else '' }}" href="/dokumente">Alle</a>
+    <a class="pill {{ 'is-active' if status_filter == 'pruefung' else '' }}" href="/dokumente?status=pruefung">Prüfung erforderlich</a>
+    <a class="pill {{ 'is-active' if status_filter == 'nicht_zuordenbar' else '' }}" href="/dokumente?status=nicht_zuordenbar">Nicht zuordenbar</a>
+    <a class="pill {{ 'is-active' if status_filter == 'bestaetigt' else '' }}" href="/dokumente?status=bestaetigt">Bestätigt</a>
+  </div>
 </div>
 
 <form class="filters-form" method="get">
   {% if status_filter %}<input type="hidden" name="status" value="{{ status_filter }}">{% endif %}
-  <input type="search" name="q" value="{{ search_query or '' }}" placeholder="Dokument oder Lieferant suchen">
+  <input type="search" name="q" value="{{ search_query or '' }}" placeholder="Dokument, Lieferant oder Auftrag suchen">
   <input type="date" name="von" value="{{ von }}">
   <span class="date-sep">bis</span>
   <input type="date" name="bis" value="{{ bis }}">
@@ -53,127 +45,86 @@
   {% endif %}
 </form>
 
-<div class="{{ 'dashboard-grid' if selected_entry else '' }}">
-  <section class="card">
-    <div class="table-scroll">
-      <table class="data-table">
-        <thead>
-          <tr>
-            <th>Typ</th>
-            {{ sort_th(cols["dateiname"]) }}
-            <th>Lieferant / Kunde</th>
-            {{ sort_th(cols["datum"]) }}
-            {{ sort_th(cols["betrag"]) }}
-            {{ sort_th(cols["auftrag"]) }}
-            {{ sort_th(cols["status"]) }}
-            {{ sort_th(cols["confidence"]) }}
-            <th>Aktion</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for vr in view_rows %}
-          {% set entry = vr.entry %}
-          <tr class="{{ 'is-selected' if vr.selected else '' }}">
-            <td><span class="file-type-badge">PDF</span></td>
-            <td>
-              <a class="cell-primary" href="{{ vr.href }}">{{ entry.row.filename }}</a>
-              <div class="cell-secondary">{{ entry.row.document_type_label }}</div>
-            </td>
-            <td>{{ entry.row.partner_name or "–" }}</td>
-            <td>{{ entry.row.belegdatum|de_date if entry.row.belegdatum else "–" }}</td>
-            <td>{{ entry.row.betrag|de_currency(entry.row.waehrung) }}</td>
-            <td>
-              {% if entry.order %}
-                <a href="/auftrag/details?erf_nr={{ entry.order.erf_nr|urlencode }}">{{ entry.order.erf_nr }}</a>
-              {% elif entry.row.candidate_erf_nr %}
-                {{ entry.row.candidate_erf_nr }} <span class="hint-text">(nicht gefunden)</span>
-              {% else %}
-                –
-              {% endif %}
-            </td>
-            <td>{{ status_badge(entry.row) }}</td>
-            <td>{{ confidence_badge(entry.row) }}</td>
-            <td>
-              {% if entry.row.status in ("Prüfung erforderlich", "Nicht zuordenbar", "Fehlerhaft") and entry.row.file_exists %}
+<section class="card">
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr>
+          {{ sort_th(cols["dateiname"]) }}
+          <th>Lieferant / Kunde</th>
+          {{ sort_th(cols["auftrag"]) }}
+          {{ sort_th(cols["status"]) }}
+          {{ sort_th(cols["confidence"]) }}
+          {{ sort_th(cols["datum"]) }}
+          <th>Aktion</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for vr in view_rows %}
+        {% set entry = vr.entry %}
+        <tr>
+          <td>
+            {% if entry.row.file_exists %}
+            <a class="cell-primary" href="/zuordnung/pruefen?doc={{ entry.row.path|urlencode }}">{{ entry.row.filename }}</a>
+            {% else %}
+            <span class="cell-primary">{{ entry.row.filename }}</span>
+            {% endif %}
+            <div class="cell-secondary">{{ entry.row.document_type_label }}</div>
+          </td>
+          <td>{{ entry.row.partner_name or "–" }}</td>
+          <td>
+            {% if entry.order %}
+              <a href="/auftrag/details?erf_nr={{ entry.order.erf_nr|urlencode }}">{{ entry.order.erf_nr }}</a>
+            {% elif entry.row.candidate_erf_nr %}
+              {{ entry.row.candidate_erf_nr }} <span class="hint-text">(nicht gefunden)</span>
+            {% else %}
+              –
+            {% endif %}
+          </td>
+          <td>{{ status_badge(entry.row) }}</td>
+          <td>{{ confidence_badge(entry.row) }}</td>
+          <td>{{ entry.row.belegdatum|de_date if entry.row.belegdatum else entry.row.received_at|de_date }}</td>
+          <td>
+            <div class="action-btns">
+              {% if entry.row.file_exists %}
+                {% if entry.row.status == "Bestätigt" %}
+                <a class="btn btn-primary btn-small" href="/zuordnung/pruefen?doc={{ entry.row.path|urlencode }}">Bearbeiten</a>
+                <form method="post" action="/zuordnung/loeschen" class="inline-form"
+                      onsubmit="return confirm('Zuordnung wirklich entfernen? Das Dokument bleibt erhalten.');">
+                  <input type="hidden" name="doc" value="{{ entry.row.path }}">
+                  <input type="hidden" name="next" value="/dokumente">
+                  <button class="btn btn-secondary btn-small" type="submit">Zuordnung löschen</button>
+                </form>
+                {% else %}
                 <a class="btn btn-secondary btn-small" href="/zuordnung/pruefen?doc={{ entry.row.path|urlencode }}">Prüfen</a>
-              {% else %}
-                <a class="btn btn-secondary btn-small" href="{{ vr.href }}">Details</a>
+                {% endif %}
               {% endif %}
-            </td>
-          </tr>
-          {% else %}
-          <tr>
-            <td colspan="9" class="empty-cell">
-              {{ empty_message }}
-              {% if status_counts.alle == 0 %}<br><a href="/eingang">Dokumente importieren →</a>{% endif %}
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-    {% if show_pagination %}
-    <div class="pagination">
-      {% for link in page_links %}
-      <a class="page-link {{ 'is-active' if link.active else '' }}" href="{{ link.href }}">{{ link.page }}</a>
-      {% endfor %}
-    </div>
-    {% endif %}
-  </section>
-
-  {% if selected_entry %}
-  <div class="side-column">
-    <section class="card detail-panel">
-      <div class="card-header">
-        <h2>{{ selected_entry.row.filename }}</h2>
-        <a class="panel-close" href="{{ close_href }}" aria-label="Schließen">×</a>
-      </div>
-      <dl class="detail-list">
-        <dt>Dokumenttyp</dt><dd>{{ selected_entry.row.document_type_label }}</dd>
-        <dt>Lieferant / Kunde</dt><dd>{{ selected_entry.row.partner_name or "–" }}</dd>
-        <dt>Belegnummer</dt><dd>{{ selected_order_number or "–" }}</dd>
-        <dt>Belegdatum</dt><dd>{{ selected_entry.row.belegdatum|de_date if selected_entry.row.belegdatum else "–" }}</dd>
-        <dt>Betrag</dt><dd>{{ selected_entry.row.betrag|de_currency(selected_entry.row.waehrung) }}</dd>
-        <dt>Importiert</dt><dd>{{ selected_entry.row.received_at|de_datetime }}</dd>
-        <dt>Dateigröße</dt><dd>{{ selected_file_size|file_size }}</dd>
-        <dt>Status</dt><dd>{{ status_badge(selected_entry.row) }}</dd>
-        <dt>Sicherheit</dt><dd>{{ confidence_badge(selected_entry.row) }}</dd>
-        <dt>Zugeordneter Auftrag</dt>
-        <dd>
-          {% if selected_entry.order %}
-            <a href="/auftrag/details?erf_nr={{ selected_entry.order.erf_nr|urlencode }}">{{ selected_entry.order.erf_nr }}</a>
-          {% elif selected_entry.row.candidate_erf_nr %}
-            {{ selected_entry.row.candidate_erf_nr }} <span class="hint-text">(Auftrag nicht gefunden oder storniert)</span>
-          {% else %}
-            –
-          {% endif %}
-        </dd>
-      </dl>
-
-      <div class="detail-actions">
-        {% if selected_entry.row.file_exists %}
-          <a class="btn btn-secondary btn-small" href="/dokument/datei?doc={{ selected_entry.row.path|urlencode }}&mode=inline" target="_blank">PDF öffnen ↗</a>
-          <a class="btn btn-secondary btn-small" href="/dokument/datei?doc={{ selected_entry.row.path|urlencode }}&mode=download">Herunterladen</a>
+              <form method="post" action="/dokument/loeschen" class="inline-form"
+                    onsubmit="return confirm('Dokument inkl. Datei wirklich unwiderruflich löschen?');">
+                <input type="hidden" name="doc" value="{{ entry.row.path }}">
+                <input type="hidden" name="next" value="/dokumente">
+                <button class="btn btn-danger btn-small" type="submit">Löschen</button>
+              </form>
+            </div>
+          </td>
+        </tr>
         {% else %}
-          <p class="hint-text">Originaldatei ist nicht mehr verfügbar.</p>
-        {% endif %}
-        {% if selected_entry.row.status in ("Prüfung erforderlich", "Nicht zuordenbar", "Fehlerhaft") and selected_entry.row.file_exists %}
-          <a class="btn btn-primary btn-small" href="/zuordnung/pruefen?doc={{ selected_entry.row.path|urlencode }}">Zur Prüfseite →</a>
-        {% endif %}
-      </div>
-    </section>
-
-    {% if events %}
-    <section class="card">
-      <div class="card-header"><h2>Ereignisverlauf</h2></div>
-      <ul class="event-list">
-        {% for timestamp, text in events %}
-        <li><span>{{ text }}</span><span class="event-time">{{ timestamp|de_datetime }}</span></li>
+        <tr>
+          <td colspan="7" class="empty-cell">
+            {{ empty_message }}
+            {% if not status_filter and not search_query and not von and not bis and not doc_type_filter %}<br><a href="/">Dokumente importieren →</a>{% endif %}
+          </td>
+        </tr>
         {% endfor %}
-      </ul>
-    </section>
-    {% endif %}
+      </tbody>
+    </table>
+  </div>
+  {% if show_pagination %}
+  <div class="pagination">
+    {% for link in page_links %}
+    <a class="page-link {{ 'is-active' if link.active else '' }}" href="{{ link.href }}">{{ link.page }}</a>
+    {% endfor %}
   </div>
   {% endif %}
-</div>
+</section>
 {% endblock %}

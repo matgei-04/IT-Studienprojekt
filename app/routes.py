@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import io
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from urllib.parse import quote, urlencode
 
 from app import data, table
@@ -37,23 +38,20 @@ def _base_context(active_key: str, page_title: str) -> dict:
 def dashboard(query: dict[str, str]) -> str:
     all_items, warning = data.get_open_review_items()
     kpis = data.compute_kpis(all_items)
-    today = data.compute_today(all_items)
-    max_today = max(today.values()) if any(today.values()) else 0
 
     sort, direction = _sort_dir(query)
     review_items = [i for i in all_items if i.bucket in ("pruefung", "nicht_zuordenbar")]
     review_items = data.sort_items(review_items, sort, direction)[:8]
     cols = table.build_sort_columns("/", query, sort, direction)
 
-    all_rows, _ = data.get_assignment_rows()
+    # open_items wiederverwenden – verhindert zweiten vollen DB-/Scan-Lauf
+    all_rows, _ = data.get_assignment_rows(open_items=all_items, warning=warning)
     recent_events = sorted(data.order_events(all_rows), key=lambda e: e[0], reverse=True)[:8]
 
     context = _base_context("uebersicht", "Übersicht")
     context.update(
         warning=warning,
         kpis=kpis,
-        today=today,
-        max_today=max_today,
         items=review_items,
         cols=cols,
         recent_events=recent_events,
@@ -65,6 +63,7 @@ _EMPTY_MESSAGES = {
     "pruefung": "Keine Dokumente mit Prüfbedarf. Alle offenen Fälle sind entweder eindeutig oder bereits bestätigt.",
     "nicht_zuordenbar": "Keine nicht zuordenbaren Dokumente.",
     "bestaetigt": "Noch keine bestätigten Zuordnungen.",
+    "zugeordnet": "Keine zugeordneten Dokumente.",
 }
 
 
@@ -73,38 +72,7 @@ def _empty_message(active_filter: str | None, search_query: str | None) -> str:
         return f"Keine Treffer für „{search_query}“."
     if active_filter in _EMPTY_MESSAGES:
         return _EMPTY_MESSAGES[active_filter]
-    return "Keine offenen Zuordnungen. Alle aktuell importierten Dokumente wurden geprüft."
-
-
-def zuordnungen(query: dict[str, str]) -> str:
-    all_rows, warning = data.get_assignment_rows()
-    open_count = sum(1 for r in all_rows if r.status != "Bestätigt")
-
-    active_filter = query.get("filter") or None
-    if active_filter not in {"pruefung", "nicht_zuordenbar", "bestaetigt"}:
-        active_filter = None
-    search_query = query.get("q") or None
-    filtered = data.filter_assignment_rows(all_rows, active_filter, search_query)
-
-    sort, direction = _sort_dir(query)
-    if "sort" in query:
-        filtered = data.sort_assignment_rows(filtered, sort, direction)
-    else:
-        # Standardansicht: offene/unsichere Fälle zuerst, dringendste zuerst.
-        filtered = data.sort_assignment_rows(filtered, sort, direction, prioritize_open=True)
-    cols = table.build_sort_columns("/zuordnungen", query, sort, direction)
-
-    context = _base_context("zuordnungen", "Zuordnungen")
-    context.update(
-        warning=warning,
-        rows=filtered,
-        cols=cols,
-        open_count=open_count,
-        active_filter=active_filter,
-        search_query=search_query,
-        empty_message=_empty_message(active_filter, search_query),
-    )
-    return render("zuordnungen.html", **context)
+    return "Noch keine Dokumente importiert."
 
 
 def pruefen(query: dict[str, str]) -> str:
@@ -112,7 +80,7 @@ def pruefen(query: dict[str, str]) -> str:
     detail = data.get_review_detail(doc_path) if doc_path else None
 
     if detail is None:
-        context = _base_context("zuordnungen", "Zuordnung prüfen")
+        context = _base_context("dokumente", "Zuordnung prüfen")
         context.update(
             message="Dokument wurde nicht gefunden (evtl. verschoben oder gelöscht).",
         )
@@ -121,11 +89,8 @@ def pruefen(query: dict[str, str]) -> str:
     item, candidate, reasons, confirmed = detail
 
     manual_q = query.get("manual_q")
-    manual_results: list = []
-    if manual_q and candidate is None and confirmed is None:
-        manual_results, _ = data.search_orders(manual_q)
 
-    context = _base_context("zuordnungen", "Zuordnung prüfen")
+    context = _base_context("dokumente", "Zuordnung prüfen")
     context.update(
         item=item,
         candidate=candidate,
@@ -133,9 +98,33 @@ def pruefen(query: dict[str, str]) -> str:
         confirmed=confirmed,
         error=query.get("error"),
         manual_q=manual_q,
-        manual_results=manual_results,
     )
     return render("pruefen.html", **context)
+
+
+def search_orders_api(query: dict[str, str]) -> dict:
+    """JSON für Live-Suche auf der Prüfseite (Auftragsnummer / Kunde / Referenz)."""
+    q = (query.get("q") or "").strip()
+    try:
+        limit = min(max(int(query.get("limit", "8")), 1), 20)
+    except ValueError:
+        limit = 8
+    if len(q) < 1:
+        return {"ok": True, "query": q, "results": []}
+    orders, warning = data.search_orders(q, limit=limit)
+    return {
+        "ok": warning is None,
+        "query": q,
+        "warning": warning,
+        "results": [
+            {
+                "erf_nr": o.erf_nr,
+                "kunde": o.kunde,
+                "beschreibung": o.beschreibung,
+            }
+            for o in orders
+        ],
+    }
 
 
 def confirm(form: dict[str, str]) -> str:
@@ -160,28 +149,26 @@ def confirm(form: dict[str, str]) -> str:
     return f"/zuordnung/pruefen?doc={quote(doc_path)}&error={quote(message)}"
 
 
-def eingang(query: dict[str, str]) -> str:
-    records, warning = data.get_assignment_rows()
-    status = data.compute_import_status(records)
+def delete_assignment(form: dict[str, str]) -> str:
+    doc_path = form.get("doc", "")
+    next_url = form.get("next") or "/dokumente"
+    ok, message = data.delete_assignment(doc_path)
+    if ok:
+        # Dokument bleibt – zurück zur Prüfseite, falls Datei noch da
+        if Path(doc_path).is_file():
+            return f"/zuordnung/pruefen?doc={quote(doc_path)}"
+        return next_url
+    return f"{next_url}?error={quote(message)}" if "?" not in next_url else f"{next_url}&error={quote(message)}"
 
-    sort = query.get("sort", "date")
-    if sort not in {"document", "date", "status"}:
-        sort = "date"
-    direction = query.get("dir", "desc")
-    if direction not in {"asc", "desc"}:
-        direction = "desc"
 
-    records = data.sort_assignment_rows(records, sort, direction)
-    cols = table.build_sort_columns("/eingang", query, sort, direction, table.IMPORT_SORTABLE_COLUMNS)
-
-    context = _base_context("eingang", "Eingang")
-    context.update(
-        warning=warning,
-        records=records,
-        cols=cols,
-        status=status,
-    )
-    return render("eingang.html", **context)
+def delete_document(form: dict[str, str]) -> str:
+    doc_path = form.get("doc", "")
+    next_url = form.get("next") or "/dokumente"
+    ok, message = data.delete_document(doc_path)
+    if ok:
+        return next_url
+    sep = "&" if "?" in next_url else "?"
+    return f"{next_url}{sep}error={quote(message)}"
 
 
 def upload(filename: str, content: bytes) -> dict:
@@ -303,36 +290,15 @@ def auftrag_details(query: dict[str, str]) -> str:
 
 DOCUMENT_PAGE_SIZE = 20
 
-_DOCUMENT_EMPTY_MESSAGES = {
-    "zugeordnet": "Keine zugeordneten Dokumente.",
-    "pruefung": "Keine Dokumente mit Prüfbedarf.",
-    "nicht_zuordenbar": "Keine nicht zuordenbaren Dokumente.",
-}
-
-
-def _document_empty_message(status_filter: str | None, search_query: str | None) -> str:
-    if search_query:
-        return f"Keine Treffer für „{search_query}“."
-    if status_filter in _DOCUMENT_EMPTY_MESSAGES:
-        return _DOCUMENT_EMPTY_MESSAGES[status_filter]
-    return "Noch keine Dokumente importiert."
-
-
-def _document_href(query: dict[str, str], doc_path: str | None) -> str:
-    """Baut einen /dokumente-Link, der die aktuellen Filter/Sortierung/Seite
-    beibehält und nur den `doc`-Parameter setzt (oder entfernt)."""
-    params = {k: v for k, v in query.items() if k != "doc"}
-    if doc_path:
-        params["doc"] = doc_path
-    return f"/dokumente?{urlencode(params)}" if params else "/dokumente"
-
 
 def dokumente(query: dict[str, str]) -> str:
     all_entries, warning = data.get_document_entries()
-    status_counts = data.compute_document_status_counts(all_entries)
+    open_count = sum(1 for e in all_entries if e.row.status != "Bestätigt")
 
     status_filter = query.get("status") or None
-    if status_filter not in ("zugeordnet", "pruefung", "nicht_zuordenbar"):
+    if status_filter == "zugeordnet":
+        status_filter = "bestaetigt"
+    if status_filter not in ("bestaetigt", "pruefung", "nicht_zuordenbar"):
         status_filter = None
     doc_type_filter = query.get("typ") or None
     search_query = query.get("q") or None
@@ -349,7 +315,10 @@ def dokumente(query: dict[str, str]) -> str:
     direction = query.get("dir", "desc")
     if direction not in {"asc", "desc"}:
         direction = "desc"
-    filtered = data.sort_document_entries(filtered, sort, direction)
+    if "sort" in query:
+        filtered = data.sort_document_entries(filtered, sort, direction)
+    else:
+        filtered = data.sort_document_entries(filtered, sort, direction, prioritize_open=True)
 
     try:
         page = max(1, int(query.get("page", "1")))
@@ -364,26 +333,13 @@ def dokumente(query: dict[str, str]) -> str:
     page_links = table.build_page_links("/dokumente", query, total_pages, page)
     doc_type_options = sorted({e.row.document_type_label for e in all_entries})
 
-    selected_path = query.get("doc")
-    view_rows = [
-        {"entry": e, "href": _document_href(query, e.row.path), "selected": e.row.path == selected_path}
-        for e in page_items
-    ]
+    view_rows = [{"entry": e} for e in page_items]
 
-    selected_entry = None
-    events = []
-    selected_order_number = None
-    selected_file_size = None
-    if selected_path:
-        selected_entry, _w = data.get_document_entry(selected_path)
-        if selected_entry:
-            events = data.order_events([selected_entry.row])
-            selected_order_number, selected_file_size = data.get_document_file_info(selected_path)
-
-    context = _base_context("dokumente", "Dokumente")
+    context = _base_context("dokumente", "Dokumentenzuordnung")
     context.update(
         warning=warning,
-        status_counts=status_counts,
+        error=query.get("error"),
+        open_count=open_count,
         status_filter=status_filter,
         doc_type_filter=doc_type_filter,
         doc_type_options=doc_type_options,
@@ -394,12 +350,7 @@ def dokumente(query: dict[str, str]) -> str:
         view_rows=view_rows,
         page_links=page_links,
         show_pagination=total_pages > 1,
-        empty_message=_document_empty_message(status_filter, search_query),
-        selected_entry=selected_entry,
-        selected_order_number=selected_order_number,
-        selected_file_size=selected_file_size,
-        close_href=_document_href(query, None),
-        events=events,
+        empty_message=_empty_message(status_filter, search_query),
     )
     return render("dokumente.html", **context)
 

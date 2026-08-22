@@ -5,9 +5,8 @@
 <div class="page-header">
   <div>
     <h1>Übersicht</h1>
-    <p class="page-subtitle">Behalte alle neuen Belege und offenen Zuordnungen im Blick.</p>
+    <p class="page-subtitle">Belege importieren und offene Zuordnungen im Blick behalten.</p>
   </div>
-  <a class="btn btn-primary" href="/eingang">Dokumente importieren</a>
 </div>
 
 {% if warning %}
@@ -15,68 +14,52 @@
 {% endif %}
 
 <div class="kpi-grid">
-  <a class="kpi-card" href="/zuordnungen">
+  <a class="kpi-card" href="/dokumente">
     <span class="kpi-label">Neu eingegangen</span>
     <span class="kpi-value">{{ kpis.neu }}</span>
   </a>
-  <a class="kpi-card" href="/zuordnungen?filter=automatisch">
+  <a class="kpi-card" href="/dokumente?status=bestaetigt">
     <span class="kpi-label">Automatisch zugeordnet</span>
     <span class="kpi-value kpi-value--success">{{ kpis.automatisch }}</span>
   </a>
-  <a class="kpi-card" href="/zuordnungen?filter=pruefung">
+  <a class="kpi-card" href="/dokumente?status=pruefung">
     <span class="kpi-label">Prüfung erforderlich</span>
     <span class="kpi-value kpi-value--warning">{{ kpis.pruefung }}</span>
   </a>
-  <a class="kpi-card" href="/zuordnungen?filter=nicht_zuordenbar">
+  <a class="kpi-card" href="/dokumente?status=nicht_zuordenbar">
     <span class="kpi-label">Nicht zuordenbar</span>
     <span class="kpi-value kpi-value--danger">{{ kpis.nicht_zuordenbar }}</span>
   </a>
 </div>
 
-<div class="dashboard-grid">
-  <section class="card">
-    <div class="card-header">
-      <h2>Priorisierte Prüfungen</h2>
+<section class="card upload-card">
+  <div id="drop-zone" class="drop-zone">
+    <p class="drop-zone-text">PDFs hier ablegen oder <label for="file-input" class="drop-zone-link">Dateien auswählen</label></p>
+    <div class="drop-zone-actions">
+      <button type="button" class="btn btn-primary" onclick="document.getElementById('file-input').click()">Dateien auswählen</button>
+      <button type="button" class="btn btn-secondary" onclick="document.getElementById('folder-input').click()">Ordner importieren</button>
     </div>
-    {{ review_table(items, cols, "Aktuell keine offenen Prüfungen – alles erledigt.", view_all_href="/zuordnungen") }}
+    <input type="file" id="file-input" accept=".pdf" multiple hidden>
+    <input type="file" id="folder-input" webkitdirectory multiple hidden>
+  </div>
+  <ul id="upload-results" class="upload-results"></ul>
+</section>
+
+<div class="dashboard-grid dashboard-grid--equal">
+  <section class="card dashboard-panel">
+    <div class="card-header">
+      <h2>Dokumentenzuordnung</h2>
+    </div>
+    <div class="dashboard-panel-body">
+      {{ review_table(items, cols, "Aktuell keine offenen Prüfungen – alles erledigt.", view_all_href="/dokumente?status=pruefung") }}
+    </div>
   </section>
 
-  <div class="side-column">
-    <section class="card">
-      <div class="card-header">
-        <h2>Verarbeitung heute</h2>
-      </div>
-      <div class="status-list">
-        <div class="status-row">
-          <span class="status-label">Neu eingegangen</span>
-          <span class="status-count">{{ today.neu }}</span>
-        </div>
-        <div class="progress-track"><div class="progress-fill progress-fill--neutral" style="width: {{ (today.neu / max_today) * 100 if max_today else 0 }}%"></div></div>
-
-        <div class="status-row">
-          <span class="status-label">Automatisch zugeordnet</span>
-          <span class="status-count">{{ today.automatisch }}</span>
-        </div>
-        <div class="progress-track"><div class="progress-fill progress-fill--success" style="width: {{ (today.automatisch / max_today) * 100 if max_today else 0 }}%"></div></div>
-
-        <div class="status-row">
-          <span class="status-label">In Prüfung</span>
-          <span class="status-count">{{ today.pruefung }}</span>
-        </div>
-        <div class="progress-track"><div class="progress-fill progress-fill--warning" style="width: {{ (today.pruefung / max_today) * 100 if max_today else 0 }}%"></div></div>
-
-        <div class="status-row">
-          <span class="status-label">Nicht zuordenbar</span>
-          <span class="status-count">{{ today.nicht_zuordenbar }}</span>
-        </div>
-        <div class="progress-track"><div class="progress-fill progress-fill--danger" style="width: {{ (today.nicht_zuordenbar / max_today) * 100 if max_today else 0 }}%"></div></div>
-      </div>
-    </section>
-
-    <section class="card">
-      <div class="card-header">
-        <h2>Letzte Aktivitäten</h2>
-      </div>
+  <section class="card dashboard-panel">
+    <div class="card-header">
+      <h2>Letzte Aktivitäten</h2>
+    </div>
+    <div class="dashboard-panel-body">
       {% if recent_events %}
       <ul class="activity-list">
         {% for ts, label in recent_events %}
@@ -89,7 +72,88 @@
       {% else %}
       <p class="empty-state">Keine Aktivitätshistorie verfügbar.</p>
       {% endif %}
-    </section>
-  </div>
+    </div>
+  </section>
 </div>
+
+<script>
+(function () {
+  const dropZone = document.getElementById('drop-zone');
+  const fileInput = document.getElementById('file-input');
+  const folderInput = document.getElementById('folder-input');
+  const resultsList = document.getElementById('upload-results');
+
+  function addResult(text, ok) {
+    const li = document.createElement('li');
+    li.className = ok ? 'upload-result upload-result--ok' : 'upload-result upload-result--error';
+    li.textContent = text;
+    resultsList.appendChild(li);
+  }
+
+  async function uploadOne(file) {
+    if (!file.name.toLowerCase().endsWith('.pdf')) {
+      addResult(`${file.name}: Nur PDF-Dateien werden unterstützt.`, false);
+      return false;
+    }
+    if (file.size === 0) {
+      addResult(`${file.name}: Datei ist leer.`, false);
+      return false;
+    }
+    try {
+      const response = await fetch('/eingang/upload?filename=' + encodeURIComponent(file.name), {
+        method: 'POST',
+        body: file,
+      });
+      const result = await response.json();
+      if (result.ok) {
+        addResult(`${result.filename}: importiert – ${result.status} (${result.confidence}%)`, true);
+        return true;
+      }
+      addResult(result.error || `${file.name}: Import fehlgeschlagen.`, false);
+      return false;
+    } catch (err) {
+      addResult(`${file.name}: Verbindungsfehler beim Import.`, false);
+      return false;
+    }
+  }
+
+  async function uploadFiles(fileList) {
+    resultsList.innerHTML = '';
+    const files = Array.from(fileList).filter((f) => f.name.toLowerCase().endsWith('.pdf'));
+    if (files.length === 0) {
+      addResult('Keine PDF-Dateien in der Auswahl gefunden.', false);
+      return;
+    }
+    let successCount = 0;
+    for (const file of files) {
+      const ok = await uploadOne(file);
+      if (ok) successCount += 1;
+    }
+    if (successCount === files.length) {
+      setTimeout(() => window.location.reload(), 1200);
+    }
+  }
+
+  fileInput.addEventListener('change', (e) => uploadFiles(e.target.files));
+  folderInput.addEventListener('change', (e) => uploadFiles(e.target.files));
+
+  ['dragenter', 'dragover'].forEach((evt) =>
+    dropZone.addEventListener(evt, (e) => {
+      e.preventDefault();
+      dropZone.classList.add('is-dragover');
+    })
+  );
+  ['dragleave', 'drop'].forEach((evt) =>
+    dropZone.addEventListener(evt, (e) => {
+      e.preventDefault();
+      dropZone.classList.remove('is-dragover');
+    })
+  );
+  dropZone.addEventListener('drop', (e) => {
+    if (e.dataTransfer && e.dataTransfer.files.length) {
+      uploadFiles(e.dataTransfer.files);
+    }
+  });
+})();
+</script>
 {% endblock %}

@@ -18,7 +18,7 @@ def load_settings(env_path: Path | None = None) -> Settings:
         load_dotenv()
 
     scan_directory = Path(
-        os.getenv("SCAN_DIRECTORY", "./sample_scans")
+        os.getenv("SCAN_DIRECTORY", "./eingang")
     ).expanduser().resolve()
 
     min_text = os.getenv("MIN_DIRECT_TEXT_LENGTH", "40")

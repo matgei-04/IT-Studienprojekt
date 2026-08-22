@@ -1,25 +1,28 @@
 """Datenzugriff: Extraktion + Matching einmalig je Dokument ausführen und
 dauerhaft in der Tabelle "Dokumente" speichern, danach von dort lesen.
 
-Warum eine eigene Tabelle (seit migrations/0001_create_dokumente.sql)?
-`DokumentZuordnung` speichert laut Schema nur bereits BESTÄTIGTE
-Zuordnungen. Belegdatum/Betrag sowie OCR-/Matching-Abschlusszeitstempel
-müssen aber für JEDES importierte Dokument nachvollziehbar sein – dafür
-gibt es "Dokumente" (siehe migrations/). Ein Dokument wird nur beim ERSTEN
-Auftreten verarbeitet (Extraktion, OCR, Belegdatum-/Betrags-Erkennung,
-Matching); Folgeaufrufe lesen die gespeicherten Werte, statt erneut zu
-OCRen/matchen.
+Warum eine eigene Tabelle "Dokumente"?
+`DokumentZuordnung` speichert nur BESTÄTIGTE Zuordnungen und verweist per
+`DokumenteId` auf "Dokumente". Die Auftragsnummer (`ErfNr`) zeigt fachlich
+auf `3100_Sdg_Haupt.ErfNr` (kein eigener FK / keine App-Tabelle "Auftraege").
+Belegdatum/Betrag sowie OCR-/Matching-Abschlusszeitstempel müssen für JEDES
+importierte Dokument nachvollziehbar sein – dafür gibt es "Dokumente".
+Ein Dokument wird nur beim ERSTEN Auftreten verarbeitet; Folgeaufrufe lesen
+die gespeicherten Werte, statt erneut zu OCRen/matchen.
 """
 
 from __future__ import annotations
 
 import re
+import threading
+import time
 from dataclasses import dataclass
 from functools import lru_cache
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 import fitz  # PyMuPDF – nur zur Validierung hochgeladener Dateien
 from dotenv import dotenv_values
@@ -33,6 +36,16 @@ from matching.candidate_search import CandidateRepository
 from matching.matcher import DocumentMatcher
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_LOCAL_TZ = ZoneInfo("Europe/Berlin")
+
+
+def _now() -> datetime:
+    """Aktuelle Zeit in Europe/Berlin (mit Zeitzone)."""
+    return datetime.now(_LOCAL_TZ)
+
+
+def _now_iso() -> str:
+    return _now().isoformat()
 
 # Schwellwerte für die Ampel-Einteilung der Confidence (siehe README).
 AUTO_MATCH_THRESHOLD = 0.80
@@ -117,7 +130,11 @@ def confidence_display(
 
 def workflow_status(candidate_erf_nr: str | None, note: str | None) -> str:
     """Einheitlicher Bearbeitungsstatus für offene (noch nicht bestätigte) Dokumente."""
+    if note and "Hintergrund" in note:
+        return "In Bearbeitung"
     if note and "Matching-Fehler" in note:
+        return "Fehlerhaft"
+    if note and "OCR-Fehler" in note:
         return "Fehlerhaft"
     if candidate_erf_nr:
         return "Prüfung erforderlich"
@@ -138,13 +155,132 @@ def _get_supabase():
     Sekunden langsam. Die Zugangsdaten stehen fest in der .env und ändern
     sich nicht zur Laufzeit, ein einmalig erstellter Client kann daher für
     die gesamte Lebensdauer der Anwendung wiederverwendet werden.
+
+    httpx-Limits + Retry-Wrapper: verhindern unter macOS häufiges Errno 35
+    (EAGAIN), wenn Page-Load und Hintergrundverarbeitung parallel laufen.
     """
     env = _get_env()
     url = env.get("SUPABASE_URL")
     key = env.get("SUPABASE_KEY")
     if not url or not key:
         return None
-    return create_client(url, key)
+
+    import httpx
+    from supabase.lib.client_options import SyncClientOptions
+
+    _install_postgrest_retry()
+    http = httpx.Client(
+        timeout=httpx.Timeout(30.0, connect=10.0),
+        limits=httpx.Limits(max_connections=6, max_keepalive_connections=2),
+    )
+    return create_client(url, key, options=SyncClientOptions(httpx_client=http))
+
+
+# Max. gleichzeitige Supabase-HTTP-Aufrufe (Page-Load + Hintergrund-OCR).
+_DB_SEMAPHORE = threading.Semaphore(2)
+_DB_RETRIES = 4
+_POSTGREST_RETRY_INSTALLED = False
+
+
+def _is_transient_db_error(exc: BaseException) -> bool:
+    """Netzwerk-/Socket-Fehler, die ein kurzes Retry lohnen (z. B. Errno 35)."""
+    text = str(exc).casefold()
+    markers = (
+        "errno 35",
+        "eagain",
+        "resource temporarily unavailable",
+        "temporarily unavailable",
+        "connection reset",
+        "connection aborted",
+        "broken pipe",
+        "timed out",
+        "timeout",
+        "server disconnected",
+        "remoteprotocolerror",
+        "connecterror",
+    )
+    return any(m in text for m in markers)
+
+
+def _install_postgrest_retry() -> None:
+    """Wrappt postgrest execute(): Semaphore + Retry – gilt für App und Matching."""
+    global _POSTGREST_RETRY_INSTALLED
+    if _POSTGREST_RETRY_INSTALLED:
+        return
+
+    from postgrest._sync import request_builder as rb
+
+    def _wrap(original):
+        def execute(self, *args, **kwargs):
+            last_exc: BaseException | None = None
+            for attempt in range(_DB_RETRIES):
+                with _DB_SEMAPHORE:
+                    try:
+                        return original(self, *args, **kwargs)
+                    except Exception as exc:  # noqa: BLE001
+                        last_exc = exc
+                        if not _is_transient_db_error(exc) or attempt >= _DB_RETRIES - 1:
+                            raise
+                time.sleep(0.2 * (2 ** attempt))
+            assert last_exc is not None
+            raise last_exc
+
+        return execute
+
+    rb.SyncQueryRequestBuilder.execute = _wrap(rb.SyncQueryRequestBuilder.execute)
+    rb.SyncSingleRequestBuilder.execute = _wrap(rb.SyncSingleRequestBuilder.execute)
+    rb.SyncMaybeSingleRequestBuilder.execute = _wrap(rb.SyncMaybeSingleRequestBuilder.execute)
+    _POSTGREST_RETRY_INSTALLED = True
+
+
+def _friendly_db_error(exc: Exception) -> str:
+    """Kurzmeldung; Errno 35 verständlich machen."""
+    if _is_transient_db_error(exc):
+        return (
+            "Datenbank vorübergehend überlastet (Netzwerk Errno 35). "
+            "Bitte Seite kurz erneut laden."
+        )
+    return f"Datenbankverbindung fehlgeschlagen: {_short_error(exc)}"
+
+
+# Kurzer In-Memory-Cache: verhindert, dass Dashboard/Zuordnungen/Eingang
+# dieselben Supabase-Tabellen innerhalb weniger Sekunden mehrfach laden.
+_CACHE_TTL_SECONDS = 20.0
+_CACHE_ERROR_TTL_SECONDS = 3.0
+_cache_lock = threading.Lock()
+_cache: dict[str, tuple[float, object]] = {}
+
+
+def _cache_get(key: str):
+    with _cache_lock:
+        entry = _cache.get(key)
+        if entry is None:
+            return None
+        expires_at, value = entry
+        if time.monotonic() >= expires_at:
+            del _cache[key]
+            return None
+        return value
+
+
+def _cache_set(key: str, value: object, ttl: float = _CACHE_TTL_SECONDS) -> None:
+    with _cache_lock:
+        _cache[key] = (time.monotonic() + ttl, value)
+
+
+def _cache_invalidate(*keys: str) -> None:
+    with _cache_lock:
+        if not keys:
+            _cache.clear()
+            return
+        for key in keys:
+            if key.endswith("*"):
+                prefix = key[:-1]
+                for cached_key in list(_cache):
+                    if cached_key.startswith(prefix):
+                        _cache.pop(cached_key, None)
+            else:
+                _cache.pop(key, None)
 
 
 def get_confirmed_paths() -> tuple[set[str], str | None]:
@@ -153,15 +289,30 @@ def get_confirmed_paths() -> tuple[set[str], str | None]:
     Zweiter Rückgabewert ist eine Fehlermeldung, falls die DB nicht
     erreichbar war (die Seite soll dann trotzdem laden, siehe Aufrufer).
     """
+    zuordnungen, warning = _fetch_zuordnungen()
+    return {row["DokumentPfad"] for row in zuordnungen if row.get("DokumentPfad")}, warning
+
+
+def _fetch_zuordnungen() -> tuple[list[dict], str | None]:
+    """Alle bestätigten Zuordnungen (kurz gecacht)."""
+    cached = _cache_get("zuordnungen")
+    if cached is not None:
+        return cached  # type: ignore[return-value]
+
     supabase = _get_supabase()
     if supabase is None:
-        return set(), "SUPABASE_URL/SUPABASE_KEY sind nicht gesetzt (.env prüfen)."
+        result = ([], "SUPABASE_URL/SUPABASE_KEY sind nicht gesetzt (.env prüfen).")
+        _cache_set("zuordnungen", result)
+        return result
 
     try:
-        response = supabase.table("DokumentZuordnung").select("DokumentPfad").execute()
-        return {row["DokumentPfad"] for row in response.data if row.get("DokumentPfad")}, None
+        response = supabase.table("DokumentZuordnung").select("*").execute()
+        result = (response.data or [], None)
+        _cache_set("zuordnungen", result)
     except Exception as exc:  # noqa: BLE001 – Dashboard soll trotzdem laden
-        return set(), f"Datenbankverbindung fehlgeschlagen: {exc}"
+        result = ([], _friendly_db_error(exc))
+        _cache_set("zuordnungen", result, ttl=_CACHE_ERROR_TTL_SECONDS)
+    return result
 
 
 def _short_error(exc: Exception, limit: int = 160) -> str:
@@ -172,7 +323,57 @@ def _short_error(exc: Exception, limit: int = 160) -> str:
     return text
 
 
-# --- Einstellungen (Singleton-Tabelle, siehe migrations/0002_*) -----------
+def _parse_datetime(value) -> datetime | None:
+    """Parst DB-Zeitstempel robust (Supabase: oft '...Z' oder Offset).
+
+    Python 3.9.fromisoformat scheitert an 'Z'; deshalb normalisieren wir.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value
+    text = str(value).strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    # Mehr als 6 Nachkommastellen kürzen (Postgres kann mehr liefern)
+    if "." in text:
+        head, rest = text.split(".", 1)
+        digits = ""
+        tz = ""
+        for i, ch in enumerate(rest):
+            if ch.isdigit():
+                digits += ch
+            else:
+                tz = rest[i:]
+                break
+        text = f"{head}.{digits[:6]}{tz}" if digits else f"{head}{tz}"
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(text[:19] if fmt != "%Y-%m-%d" else text[:10], fmt)
+            except ValueError:
+                continue
+    return None
+
+
+def _parse_date_value(value) -> date | None:
+    """Parst ein Datum aus der DB (date oder ISO-String)."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value).strip()[:10]
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+# --- Einstellungen (Singleton-Tabelle) -----------------------------------
 #
 # "Manuelle Bestätigung erforderlich" ist bewusst KEINE Spalte/Einstellung:
 # Das ist eine fachliche Sicherheitsregel, die im Code fest verankert ist
@@ -197,17 +398,33 @@ DEFAULT_EINSTELLUNGEN = Einstellungen(
 def get_einstellungen() -> tuple[Einstellungen, str | None]:
     """Liest die (einzige) Einstellungszeile. Fällt bei fehlender DB-
     Verbindung auf sichere Standardwerte zurück (nichts wird deaktiviert)."""
+    cached = _cache_get("einstellungen")
+    if cached is not None:
+        return cached  # type: ignore[return-value]
+
     supabase = _get_supabase()
     if supabase is None:
-        return DEFAULT_EINSTELLUNGEN, "SUPABASE_URL/SUPABASE_KEY sind nicht gesetzt (.env prüfen)."
+        result = (DEFAULT_EINSTELLUNGEN, "SUPABASE_URL/SUPABASE_KEY sind nicht gesetzt (.env prüfen).")
+        _cache_set("einstellungen", result)
+        return result
     try:
-        resp = supabase.table("Einstellungen").select("*").eq("Id", 1).limit(1).execute()
+        resp = (
+            supabase.table("Einstellungen")
+            .select("OcrAktiv, MatchingAktiv, SchwelleHoheUebereinstimmung, ScanOrdner")
+            .eq("Id", 1)
+            .limit(1)
+            .execute()
+        )
     except Exception as exc:  # noqa: BLE001
-        return DEFAULT_EINSTELLUNGEN, f"Datenbankverbindung fehlgeschlagen: {_short_error(exc)}"
+        result = (DEFAULT_EINSTELLUNGEN, _friendly_db_error(exc))
+        _cache_set("einstellungen", result, ttl=_CACHE_ERROR_TTL_SECONDS)
+        return result
     if not resp.data:
-        return DEFAULT_EINSTELLUNGEN, None
+        result = (DEFAULT_EINSTELLUNGEN, None)
+        _cache_set("einstellungen", result)
+        return result
     row = resp.data[0]
-    return (
+    result = (
         Einstellungen(
             ocr_aktiv=bool(row.get("OcrAktiv", True)),
             matching_aktiv=bool(row.get("MatchingAktiv", True)),
@@ -216,6 +433,8 @@ def get_einstellungen() -> tuple[Einstellungen, str | None]:
         ),
         None,
     )
+    _cache_set("einstellungen", result)
+    return result
 
 
 def get_high_confidence_threshold() -> float:
@@ -239,12 +458,13 @@ def _save_einstellungen(
                 "MatchingAktiv": matching_aktiv,
                 "SchwelleHoheUebereinstimmung": schwelle,
                 "ScanOrdner": scan_ordner,
-                "AktualisiertAm": datetime.now().isoformat(),
+                "AktualisiertAm": _now_iso(),
             },
             on_conflict="Id",
         ).execute()
     except Exception as exc:  # noqa: BLE001
         return False, f"Speichern fehlgeschlagen: {_short_error(exc)}"
+    _cache_invalidate("einstellungen", "open_items*", "assignment_rows", "orders")
     return True, "Einstellungen wurden gespeichert."
 
 
@@ -307,12 +527,47 @@ def _load_settings_with_override() -> Settings:
     return settings
 
 
+def check_required_tables() -> tuple[bool, str | None]:
+    """Prüft, ob die von der App benötigten Supabase-Tabellen erreichbar sind.
+
+    Variante A: Dokumente + DokumentZuordnung (+ Einstellungen). Keine
+    App-Tabelle "Auftraege" – Aufträge kommen aus 3100_Sdg_Haupt.
+    """
+    supabase = _get_supabase()
+    if supabase is None:
+        return False, "SUPABASE_URL/SUPABASE_KEY sind nicht gesetzt (.env prüfen)."
+
+    missing: list[str] = []
+    for table in ("Dokumente", "DokumentZuordnung", "Einstellungen"):
+        try:
+            supabase.table(table).select("*").limit(1).execute()
+        except Exception as exc:  # noqa: BLE001
+            text = str(exc)
+            if "PGRST205" in text or "schema cache" in text.casefold():
+                missing.append(table)
+            else:
+                return False, f"Tabelle {table}: {_short_error(exc)}"
+
+    if missing:
+        return (
+            False,
+            "In Supabase fehlen die Tabellen: "
+            + ", ".join(missing)
+            + ". Bitte die fehlenden Tabellen in Supabase anlegen "
+            "(oder Schema-Cache neu laden).",
+        )
+    return True, None
+
+
 def check_database_connection() -> tuple[bool, str]:
     """Kleine, sichere Lese-Abfrage gegen die Auftragsdatenbank – meldet nur
     Erfolg/Fehler + Anzahl, niemals Connection-String/URL/Zugangsdaten."""
     supabase = _get_supabase()
     if supabase is None:
         return False, "Keine Zugangsdaten konfiguriert (SUPABASE_URL/SUPABASE_KEY fehlen)."
+    ok_tables, table_warning = check_required_tables()
+    if not ok_tables:
+        return False, table_warning or "Erforderliche Tabellen fehlen."
     try:
         resp = supabase.table("3100_Sdg_Haupt").select("ErfNr", count="exact").limit(1).execute()
         count = resp.count if resp.count is not None else "unbekannte Anzahl"
@@ -343,9 +598,9 @@ def get_datasources() -> list[DataSource]:
             name="Manueller Datei-Upload",
             status="Aktiv",
             status_class="success",
-            beschreibung="PDF-Dateien per Drag-and-Drop oder Dateiauswahl im Eingang importieren.",
-            link_label="Zum Eingang",
-            link_href="/eingang",
+            beschreibung="PDF-Dateien per Drag-and-Drop oder Dateiauswahl auf der Übersicht importieren.",
+            link_label="Zur Übersicht",
+            link_href="/",
         )
     ]
 
@@ -394,34 +649,96 @@ def _braucht_neuverarbeitung(row: dict | None) -> bool:
     return row is None or row.get("Status") in ("ocr_fehler", "matching_fehler")
 
 
+_DOKUMENTE_COLUMNS = (
+    "DokumentPfad, Dateiname, DokumentTyp, ErkannteAuftragsnummer, Belegdatum, "
+    "Betrag, Waehrung, ErfNr, Score, Status, Fehlermeldung, ImportiertAm, "
+    "OcrAbgeschlossenAm, MatchingAbgeschlossenAm"
+)
+
+
 def _fetch_dokumente_by_path(supabase) -> dict[str, dict]:
     """Alle Dokumente-Zeilen auf einmal, indiziert nach DokumentPfad."""
+    cached = _cache_get("dokumente")
+    if cached is not None:
+        return cached  # type: ignore[return-value]
+
     if supabase is None:
+        _cache_set("dokumente", {})
         return {}
     try:
-        resp = supabase.table("Dokumente").select("*").execute()
-        return {row["DokumentPfad"]: row for row in resp.data if row.get("DokumentPfad")}
-    except Exception:  # noqa: BLE001 – Seite soll trotzdem laden
-        return {}
+        resp = supabase.table("Dokumente").select(_DOKUMENTE_COLUMNS).execute()
+        result = {row["DokumentPfad"]: row for row in resp.data if row.get("DokumentPfad")}
+    except Exception as exc:  # noqa: BLE001 – Seite soll trotzdem laden
+        result = {}
+        text = str(exc)
+        if "PGRST205" in text or "schema cache" in text.casefold():
+            # Kurzer Hinweis im Cache-Key „dokumente_error“ für Aufrufer mit Warning.
+            _cache_set("dokumente_error", True, ttl=60.0)
+    _cache_set("dokumente", result)
+    return result
 
 
 def _fetch_dokument_row(supabase, path: str) -> dict | None:
+    stored = _fetch_dokumente_by_path(supabase)
+    if path in stored:
+        return stored[path]
     if supabase is None:
         return None
     try:
-        resp = supabase.table("Dokumente").select("*").eq("DokumentPfad", path).limit(1).execute()
+        resp = (
+            supabase.table("Dokumente")
+            .select(_DOKUMENTE_COLUMNS)
+            .eq("DokumentPfad", path)
+            .limit(1)
+            .execute()
+        )
         return resp.data[0] if resp.data else None
     except Exception:  # noqa: BLE001
         return None
 
 
-def _upsert_dokument(supabase, row: dict) -> None:
+def _upsert_dokument(supabase, row: dict) -> int | None:
+    """Speichert/aktualisiert eine Dokumente-Zeile. Liefert die Id oder None."""
     if supabase is None:
-        return
+        return None
     try:
-        supabase.table("Dokumente").upsert(row, on_conflict="DokumentPfad").execute()
+        resp = (
+            supabase.table("Dokumente")
+            .upsert(row, on_conflict="DokumentPfad")
+            .execute()
+        )
+        _cache_invalidate("dokumente", "open_items*", "assignment_rows")
+        if resp.data and resp.data[0].get("Id") is not None:
+            return int(resp.data[0]["Id"])
+        # Manche PostgREST-Setups liefern beim Upsert keine Zeile zurück.
+        lookup = (
+            supabase.table("Dokumente")
+            .select("Id")
+            .eq("DokumentPfad", row["DokumentPfad"])
+            .limit(1)
+            .execute()
+        )
+        if lookup.data:
+            return int(lookup.data[0]["Id"])
     except Exception:  # noqa: BLE001 – Anzeige soll trotzdem funktionieren
         pass
+    return None
+
+
+def _dokumente_id_for_path(supabase, doc_path: str) -> int | None:
+    try:
+        resp = (
+            supabase.table("Dokumente")
+            .select("Id")
+            .eq("DokumentPfad", doc_path)
+            .limit(1)
+            .execute()
+        )
+        if resp.data:
+            return int(resp.data[0]["Id"])
+    except Exception:  # noqa: BLE001
+        return None
+    return None
 
 
 def _process_document(pdf_path: Path, settings, matcher: DocumentMatcher | None, supabase) -> dict:
@@ -445,7 +762,7 @@ def _process_document(pdf_path: Path, settings, matcher: DocumentMatcher | None,
 
     row["DokumentTyp"] = document.document_type
     row["ErkannteAuftragsnummer"] = document.order_number
-    row["OcrAbgeschlossenAm"] = datetime.now().isoformat()
+    row["OcrAbgeschlossenAm"] = _now_iso()
 
     belegdatum = find_belegdatum(document.text)
     betrag, waehrung = find_betrag(document.text)
@@ -476,7 +793,7 @@ def _process_document(pdf_path: Path, settings, matcher: DocumentMatcher | None,
         _upsert_dokument(supabase, row)
         return row
 
-    row["MatchingAbgeschlossenAm"] = datetime.now().isoformat()
+    row["MatchingAbgeschlossenAm"] = _now_iso()
     row["ErfNr"] = result.candidate.erf_nr if result.candidate else None
     row["Score"] = str(result.confidence)
     row["Status"] = "pruefung" if result.candidate else "nicht_zuordenbar"
@@ -519,9 +836,7 @@ def _review_item_from_row(row: dict, pdf_path: Path, high_threshold: float = AUT
         label, css_class = confidence_display(confidence, candidate_erf_nr is not None, high_threshold)
 
     imported_raw = row.get("ImportiertAm")
-    received_at = (
-        datetime.fromisoformat(imported_raw) if imported_raw else datetime.fromtimestamp(pdf_path.stat().st_mtime)
-    )
+    received_at = _parse_datetime(imported_raw) or datetime.fromtimestamp(pdf_path.stat().st_mtime)
     ocr_raw = row.get("OcrAbgeschlossenAm")
     matching_raw = row.get("MatchingAbgeschlossenAm")
     belegdatum_raw = row.get("Belegdatum")
@@ -540,33 +855,88 @@ def _review_item_from_row(row: dict, pdf_path: Path, high_threshold: float = AUT
         confidence_label=label,
         confidence_class=css_class,
         note=note,
-        belegdatum=date.fromisoformat(belegdatum_raw) if belegdatum_raw else None,
+        belegdatum=_parse_date_value(belegdatum_raw),
         betrag=_decimal_or_none(row.get("Betrag")),
         waehrung=row.get("Waehrung"),
-        ocr_completed_at=datetime.fromisoformat(ocr_raw) if ocr_raw else None,
-        matching_completed_at=datetime.fromisoformat(matching_raw) if matching_raw else None,
+        ocr_completed_at=_parse_datetime(ocr_raw),
+        matching_completed_at=_parse_datetime(matching_raw),
     )
 
 
-def get_open_review_items() -> tuple[list[ReviewItem], str | None]:
+def _pending_review_item(pdf_path: Path) -> ReviewItem:
+    """Platzhalter, solange OCR/Matching noch im Hintergrund laufen."""
+    try:
+        received_at = datetime.fromtimestamp(pdf_path.stat().st_mtime)
+    except OSError:
+        received_at = _now()
+    return ReviewItem(
+        path=str(pdf_path),
+        filename=pdf_path.name,
+        received_at=received_at,
+        document_type="unbekannt",
+        order_number=None,
+        candidate_erf_nr=None,
+        partner_name=None,
+        confidence=0.0,
+        bucket="nicht_zuordenbar",
+        confidence_label="Wird verarbeitet",
+        confidence_class="neutral",
+        note="Dokument wird im Hintergrund gelesen.",
+    )
+
+
+def _reasons_from_stored(item: ReviewItem, candidate) -> list[str]:
+    """Begründungen aus gespeicherten Werten – ohne erneutes OCR/Matching."""
+    reasons: list[str] = []
+    if item.order_number and candidate and item.order_number == candidate.erf_nr:
+        reasons.append("Auftragsnummer stimmt überein.")
+    elif item.order_number:
+        reasons.append(f"Erkannte Auftragsnummer: {item.order_number}.")
+    if candidate and candidate.referenz:
+        reasons.append(f"Auftragsreferenz: {candidate.referenz}.")
+    if candidate and (candidate.sender_name or candidate.receiver_name):
+        reasons.append("Absender/Empfänger aus der Auftragsdatenbank geladen.")
+    if item.confidence > 0:
+        reasons.append(f"Gespeicherte Übereinstimmung: {round(item.confidence * 100)}%.")
+    if not reasons:
+        reasons.append("Kein automatischer Treffer – manuelle Zuordnung nötig.")
+    reasons.append("Manuelle Bestätigung durch User nötig.")
+    return reasons
+
+
+def get_open_review_items(live_process: bool = False) -> tuple[list[ReviewItem], str | None]:
     """Alle noch nicht bestätigten Dokumente aus dem Scan-Ordner.
 
-    Liest verarbeitete Dokumente aus der Tabelle "Dokumente"; nur bei
-    erstmaligem Auftreten wird live verarbeitet (und dabei gespeichert).
+    Standard: nur gespeicherte Zeilen lesen (schnelle Seiten).
+    live_process=True: fehlende/fehlerhafte Dateien jetzt verarbeiten.
     """
-    settings = _load_settings_with_override()
-    confirmed_paths, warning = get_confirmed_paths()
+    cache_key = f"open_items:{int(live_process)}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached  # type: ignore[return-value]
 
+    settings = _load_settings_with_override()
     supabase = _get_supabase()
-    matcher = DocumentMatcher(CandidateRepository(supabase)) if supabase else None
+
+    # Sequentiell statt ThreadPool: gemeinsamer httpx-Client + parallele
+    # Aufrufe erzeugen unter macOS oft Errno 35 (EAGAIN).
+    confirmed_paths, warning = get_confirmed_paths()
+    stored = _fetch_dokumente_by_path(supabase)
     high_threshold = get_high_confidence_threshold()
+    _ok_schema, schema_warning = check_required_tables()
+    if schema_warning and not warning:
+        warning = schema_warning
+
+    matcher = (
+        DocumentMatcher(CandidateRepository(supabase)) if supabase and live_process else None
+    )
 
     try:
         pdf_paths = list_pdf_files(settings.scan_directory)
     except FileNotFoundError:
-        return [], warning or f"Scan-Verzeichnis nicht gefunden: {settings.scan_directory}"
-
-    stored = _fetch_dokumente_by_path(supabase)
+        result = ([], warning or f"Scan-Verzeichnis nicht gefunden: {settings.scan_directory}")
+        _cache_set(cache_key, result)
+        return result
 
     items: list[ReviewItem] = []
     for pdf_path in pdf_paths:
@@ -576,26 +946,32 @@ def get_open_review_items() -> tuple[list[ReviewItem], str | None]:
 
         row = stored.get(key)
         if _braucht_neuverarbeitung(row):
-            row = _process_document(pdf_path, settings, matcher, supabase)
+            if live_process:
+                row = _process_document(pdf_path, settings, matcher, supabase)
+                stored[key] = row
+            else:
+                items.append(_pending_review_item(pdf_path) if row is None else _review_item_from_row(row, pdf_path, high_threshold))
+                continue
 
         items.append(_review_item_from_row(row, pdf_path, high_threshold))
 
-    return items, warning
+    result = (items, warning)
+    _cache_set(cache_key, result)
+    return result
 
 
 def get_review_detail(path_str: str):
     """Vollständige Details zu einem Dokument (inkl. Kandidat + Begründungen).
 
-    Belegdatum/Betrag/Zeitstempel kommen aus der gespeicherten Dokumente-
-    Zeile (kein erneutes OCR). Für Kandidat + Begründungen (nicht
-    persistiert, da nur für die Prüfseite relevant) läuft Matching einmal
-    frisch – wie bisher.
+    Belegdatum/Betrag/Zeitstempel und Score kommen aus der gespeicherten
+    Dokumente-Zeile. Der Kandidat wird nur noch per ErfNr nachgeladen –
+    kein erneutes OCR/Matching auf der Prüfseite.
     """
     pdf_path = Path(path_str)
     if not pdf_path.is_file():
         return None
 
-    settings = load_settings(PROJECT_ROOT / ".env")
+    settings = _load_settings_with_override()
     supabase = _get_supabase()
     matcher = DocumentMatcher(CandidateRepository(supabase)) if supabase else None
     einstellungen, _ = get_einstellungen()
@@ -604,6 +980,7 @@ def get_review_detail(path_str: str):
     row = _fetch_dokument_row(supabase, str(pdf_path))
     if _braucht_neuverarbeitung(row):
         row = _process_document(pdf_path, settings, matcher, supabase)
+        _cache_invalidate("open_items*", "assignment_rows", "dokumente")
 
     item = _review_item_from_row(row, pdf_path, high_threshold)
 
@@ -615,29 +992,26 @@ def get_review_detail(path_str: str):
     elif not einstellungen.matching_aktiv:
         if item.note is None:
             item.note = "Matching ist in den Einstellungen deaktiviert."
-    else:
+    elif item.candidate_erf_nr:
         try:
-            document = extract_single_document(pdf_path, settings, allow_ocr=einstellungen.ocr_aktiv)
-            result = DocumentMatcher(CandidateRepository(supabase)).match(document)
-            candidate = result.candidate
-            reasons = result.breakdown.reasons
-        except Exception:  # noqa: BLE001 – Anzeige nutzt weiterhin die gespeicherten Werte
-            pass
+            found = CandidateRepository(supabase).find_by_order_number(item.candidate_erf_nr)
+            candidate = found[0] if found else None
+        except Exception:  # noqa: BLE001
+            candidate = None
+        reasons = _reasons_from_stored(item, candidate)
+    else:
+        reasons = _reasons_from_stored(item, None)
 
     confirmed = None
     if supabase is not None:
         try:
-            resp = (
-                supabase.table("DokumentZuordnung")
-                .select("*")
-                .eq("DokumentPfad", str(pdf_path))
-                .limit(1)
-                .execute()
-            )
-            if resp.data:
-                confirmed = resp.data[0]
-                if confirmed.get("BestaetigtAm"):
-                    confirmed["BestaetigtAm"] = datetime.fromisoformat(confirmed["BestaetigtAm"])
+            zuordnungen, _ = _fetch_zuordnungen()
+            for row_z in zuordnungen:
+                if row_z.get("DokumentPfad") == str(pdf_path):
+                    confirmed = dict(row_z)
+                    if confirmed.get("BestaetigtAm"):
+                        confirmed["BestaetigtAm"] = _parse_datetime(confirmed["BestaetigtAm"])
+                    break
         except Exception:  # noqa: BLE001 – Detailseite soll trotzdem laden
             pass
 
@@ -652,6 +1026,22 @@ def get_review_detail(path_str: str):
     return item, candidate, reasons, confirmed
 
 
+def process_pending_documents() -> None:
+    """Verarbeitet fehlende/fehlerhafte PDFs im Hintergrund (nicht im Page-Load)."""
+    try:
+        get_open_review_items(live_process=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"Hintergrundverarbeitung: {exc}")
+
+
+def _next_table_id(supabase, table: str) -> int:
+    """Nächste freie Id für Tabellen ohne Sequenz/Default (wie DokumentZuordnung)."""
+    max_id_resp = (
+        supabase.table(table).select("Id").order("Id", desc=True).limit(1).execute()
+    )
+    return (max_id_resp.data[0]["Id"] + 1) if max_id_resp.data else 1
+
+
 def confirm_assignment(
     doc_path: str,
     erf_nr: str,
@@ -659,12 +1049,11 @@ def confirm_assignment(
     document_type: str | None,
     confirmed_by: str | None = None,
 ) -> tuple[bool, str]:
-    """Speichert eine bestätigte Zuordnung in DokumentZuordnung.
+    """Speichert eine bestätigte Zuordnung in DokumentZuordnung (Variante A).
 
-    Legt eine neue Zeile an oder aktualisiert eine vorhandene für denselben
-    DokumentPfad (kein UNIQUE-Constraint in der DB, die Eindeutigkeit wird
-    hier in der Anwendung sichergestellt). "Id" hat in der DB keinen
-    Default/keine Sequenz, daher wird die nächste freie Id selbst ermittelt.
+    - ErfNr: fachlicher Verweis auf 3100_Sdg_Haupt.ErfNr (kein App-FK)
+    - DokumenteId: FK auf Dokumente.Id (wichtige Verknüpfung)
+    - keine Tabelle Auftraege / kein AuftragId
     """
     pdf_path = Path(doc_path)
     if not pdf_path.is_file():
@@ -682,13 +1071,36 @@ def confirm_assignment(
     if not candidates:
         return False, f"Auftrag {erf_nr} wurde nicht gefunden oder ist storniert."
 
+    dokumente_id = _upsert_dokument(
+        supabase,
+        {
+            "DokumentPfad": str(pdf_path),
+            "Dateiname": pdf_path.name,
+            "Status": "bestaetigt",
+            "ErfNr": erf_nr,
+            "Score": str(round(score, 3)),
+            "DokumentTyp": document_type,
+        },
+    )
+    if dokumente_id is None:
+        dokumente_id = _dokumente_id_for_path(supabase, str(pdf_path))
+    if dokumente_id is None:
+        return (
+            False,
+            "Dokument konnte nicht in der Tabelle Dokumente gespeichert werden "
+            "(fehlt die Tabelle in Supabase?).",
+        )
+
     payload = {
         "DokumentPfad": str(pdf_path),
         "ErfNr": erf_nr,
+        "DokumenteId": dokumente_id,
         "Score": round(score, 3),
         "DokumentTyp": document_type,
-        "BestaetigtAm": datetime.now().isoformat(),
+        "BestaetigtAm": _now_iso(),
         "BestaetigtVon": confirmed_by,
+        # Alte Spalte AuftragId bewusst auf NULL (Variante A, keine Auftraege-Tabelle).
+        "AuftragId": None,
     }
 
     try:
@@ -699,38 +1111,111 @@ def confirm_assignment(
             .limit(1)
             .execute()
         )
-        if existing.data:
+        replaced = bool(existing.data)
+        if replaced:
             row_id = existing.data[0]["Id"]
             supabase.table("DokumentZuordnung").update(payload).eq("Id", row_id).execute()
         else:
-            max_id_resp = (
-                supabase.table("DokumentZuordnung")
-                .select("Id")
-                .order("Id", desc=True)
-                .limit(1)
-                .execute()
-            )
-            next_id = (max_id_resp.data[0]["Id"] + 1) if max_id_resp.data else 1
-            payload["Id"] = next_id
+            payload["Id"] = _next_table_id(supabase, "DokumentZuordnung")
             supabase.table("DokumentZuordnung").insert(payload).execute()
     except Exception as exc:  # noqa: BLE001
         return False, f"Speichern fehlgeschlagen: {_short_error(exc)}"
 
-    # Dokumente-Status mitziehen (nur informativ – DokumentZuordnung bleibt
-    # die eigentliche Quelle der Wahrheit für "bestätigt"; wenn das hier
-    # fehlschlägt, ist die Bestätigung selbst trotzdem gültig).
-    _upsert_dokument(
-        supabase,
-        {
-            "DokumentPfad": str(pdf_path),
-            "Dateiname": pdf_path.name,
-            "Status": "bestaetigt",
-            "ErfNr": erf_nr,
-            "Score": str(round(score, 3)),
-        },
-    )
+    _cache_invalidate("zuordnungen", "dokumente", "open_items*", "assignment_rows", "orders")
 
+    if replaced:
+        return True, f"Zuordnung wurde durch Auftrag {erf_nr} ersetzt."
     return True, "Zuordnung wurde bestätigt."
+
+
+def _allowed_doc_path(doc_path_str: str) -> Path | None:
+    """Pfad innerhalb des Scan-Ordners (Datei muss nicht existieren)."""
+    if not doc_path_str:
+        return None
+    settings = _load_settings_with_override()
+    try:
+        candidate = Path(doc_path_str).expanduser().resolve()
+        scan_root = settings.scan_directory.resolve()
+    except (OSError, ValueError):
+        return None
+    try:
+        if not candidate.is_relative_to(scan_root):
+            return None
+    except (OSError, ValueError):
+        return None
+    return candidate
+
+
+def delete_assignment(doc_path: str) -> tuple[bool, str]:
+    """Entfernt die Bestätigung (DokumentZuordnung) und lässt Matching erneut laufen.
+
+    Das Dokument bleibt erhalten; Extraktion + Matching werden neu ausgeführt,
+    damit ein aktueller Zuordnungsvorschlag vorliegt.
+    """
+    path = _allowed_doc_path(doc_path)
+    if path is None:
+        return False, "Ungültiger Dokumentpfad."
+
+    supabase = _get_supabase()
+    if supabase is None:
+        return False, "Keine Datenbankverbindung – Löschen nicht möglich."
+
+    key = str(path)
+    try:
+        supabase.table("DokumentZuordnung").delete().eq("DokumentPfad", key).execute()
+        # Auch Rohpfad-Varianten (falls resolve anders speicherte)
+        if key != doc_path:
+            supabase.table("DokumentZuordnung").delete().eq("DokumentPfad", doc_path).execute()
+    except Exception as exc:  # noqa: BLE001
+        return False, f"Zuordnung konnte nicht gelöscht werden: {_short_error(exc)}"
+
+    if path.is_file():
+        settings = _load_settings_with_override()
+        matcher = DocumentMatcher(CandidateRepository(supabase))
+        _process_document(path, settings, matcher, supabase)
+    else:
+        _upsert_dokument(
+            supabase,
+            {
+                "DokumentPfad": doc_path,
+                "Dateiname": path.name,
+                "Status": "pruefung",
+                "ErfNr": None,
+                "Score": None,
+            },
+        )
+
+    _cache_invalidate("zuordnungen", "dokumente", "open_items*", "assignment_rows", "orders")
+    return True, "Zuordnung wurde entfernt – Matching erneut ausgeführt."
+
+
+def delete_document(doc_path: str) -> tuple[bool, str]:
+    """Löscht Dokument komplett: Zuordnung, Dokumente-Zeile und PDF-Datei."""
+    path = _allowed_doc_path(doc_path)
+    if path is None:
+        return False, "Ungültiger Dokumentpfad."
+
+    supabase = _get_supabase()
+    if supabase is None:
+        return False, "Keine Datenbankverbindung – Löschen nicht möglich."
+
+    keys = {str(path), doc_path}
+    try:
+        for key in keys:
+            supabase.table("DokumentZuordnung").delete().eq("DokumentPfad", key).execute()
+            supabase.table("Dokumente").delete().eq("DokumentPfad", key).execute()
+    except Exception as exc:  # noqa: BLE001
+        return False, f"Datenbankeintrag konnte nicht gelöscht werden: {_short_error(exc)}"
+
+    if path.is_file():
+        try:
+            path.unlink()
+        except OSError as exc:
+            _cache_invalidate("zuordnungen", "dokumente", "open_items*", "assignment_rows", "orders")
+            return False, f"DB gelöscht, Datei nicht: {_short_error(exc)}"
+
+    _cache_invalidate("zuordnungen", "dokumente", "open_items*", "assignment_rows", "orders")
+    return True, "Dokument wurde gelöscht."
 
 
 def compute_kpis(items: list[ReviewItem]) -> dict[str, int]:
@@ -741,17 +1226,6 @@ def compute_kpis(items: list[ReviewItem]) -> dict[str, int]:
         "pruefung": sum(1 for i in items if i.bucket == "pruefung"),
         "nicht_zuordenbar": sum(1 for i in items if i.bucket == "nicht_zuordenbar"),
     }
-
-
-def compute_today(items: list[ReviewItem]) -> dict[str, int]:
-    """Wie compute_kpis, aber nur für heute eingegangene Dokumente.
-
-    'Eingegangen' wird mangels echtem Import-Zeitstempel über das
-    Änderungsdatum der Datei angenähert (siehe Modul-Docstring).
-    """
-    today = date.today()
-    today_items = [i for i in items if i.received_at.date() == today]
-    return compute_kpis(today_items)
 
 
 SORT_FIELDS = {
@@ -769,12 +1243,7 @@ def sort_items(items: list[ReviewItem], sort: str, direction: str) -> list[Revie
 
 @dataclass
 class AssignmentRow:
-    """Ein Dokument in seinem aktuellen Bearbeitungsstand (offen oder bestätigt).
-
-    Wird von der Eingang-Seite ("Letzte Importe") und der Zuordnungen-Seite
-    (Arbeitswarteschlange) gemeinsam genutzt, damit beide denselben Status
-    zeigen und nicht auseinanderlaufen können.
-    """
+    """Ein Dokument in seinem aktuellen Bearbeitungsstand (offen oder bestätigt)."""
 
     path: str
     filename: str
@@ -823,6 +1292,11 @@ def _confirmed_lookup_data(supabase, erf_nrs: list[str]) -> dict[str, dict]:
     if not erf_nrs:
         return {}
 
+    cache_key = "lookup:" + ",".join(sorted(set(erf_nrs)))
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached  # type: ignore[return-value]
+
     lookup: dict[str, dict] = {nr: {} for nr in erf_nrs}
 
     try:
@@ -835,7 +1309,12 @@ def _confirmed_lookup_data(supabase, erf_nrs: list[str]) -> dict[str, dict]:
         pass
 
     try:
-        adr = supabase.table("3100_Sdg_Adressen").select("*").in_("ErfNr", erf_nrs).execute()
+        adr = (
+            supabase.table("3100_Sdg_Adressen")
+            .select("ErfNr, Art, Name1, Name2")
+            .in_("ErfNr", erf_nrs)
+            .execute()
+        )
         for row in adr.data:
             nr = row.get("ErfNr")
             if nr not in lookup:
@@ -847,10 +1326,14 @@ def _confirmed_lookup_data(supabase, erf_nrs: list[str]) -> dict[str, dict]:
     except Exception:  # noqa: BLE001
         pass
 
+    _cache_set(cache_key, lookup)
     return lookup
 
 
-def get_assignment_rows() -> tuple[list[AssignmentRow], str | None]:
+def get_assignment_rows(
+    open_items: list[ReviewItem] | None = None,
+    warning: str | None = None,
+) -> tuple[list[AssignmentRow], str | None]:
     """Alle bekannten Dokumente (offen + bestätigt) als einheitliche Zeilen.
 
     Grundlage für 'Eingang' (Letzte Importe) und 'Zuordnungen' (Arbeits-
@@ -859,8 +1342,14 @@ def get_assignment_rows() -> tuple[list[AssignmentRow], str | None]:
     (für Belegdatum/Betrag/Zeitstempel – dieselbe Quelle wie bei offenen
     Dokumenten, damit sich beim Bestätigen keine Werte scheinbar ändern).
     """
+    if open_items is None:
+        cached = _cache_get("assignment_rows")
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+
     settings = _load_settings_with_override()
-    open_items, warning = get_open_review_items()
+    if open_items is None:
+        open_items, warning = get_open_review_items()
 
     rows: list[AssignmentRow] = []
     for item in open_items:
@@ -891,12 +1380,14 @@ def get_assignment_rows() -> tuple[list[AssignmentRow], str | None]:
     supabase = _get_supabase()
     if supabase is not None:
         try:
-            resp = supabase.table("DokumentZuordnung").select("*").execute()
-            erf_nrs = list({row["ErfNr"] for row in resp.data if row.get("ErfNr")})
+            resp_data, zuord_warning = _fetch_zuordnungen()
+            if zuord_warning and not warning:
+                warning = zuord_warning
+            erf_nrs = list({row["ErfNr"] for row in resp_data if row.get("ErfNr")})
             extra = _confirmed_lookup_data(supabase, erf_nrs)
             dokumente = _fetch_dokumente_by_path(supabase)
 
-            for row in resp.data:
+            for row in resp_data:
                 pfad = row.get("DokumentPfad")
                 if not pfad:
                     continue
@@ -906,11 +1397,11 @@ def get_assignment_rows() -> tuple[list[AssignmentRow], str | None]:
                 dokument_row = dokumente.get(pfad, {})
                 imported_raw = dokument_row.get("ImportiertAm")
                 if imported_raw:
-                    received_at = datetime.fromisoformat(imported_raw)
+                    received_at = _parse_datetime(imported_raw) or _now()
                 elif file_exists:
                     received_at = datetime.fromtimestamp(pdf_path.stat().st_mtime)
                 else:
-                    received_at = datetime.fromisoformat(row["BestaetigtAm"])
+                    received_at = _parse_datetime(row.get("BestaetigtAm")) or _now()
                 source = (
                     _source_label(pdf_path, settings.scan_directory)
                     if file_exists
@@ -922,7 +1413,7 @@ def get_assignment_rows() -> tuple[list[AssignmentRow], str | None]:
                 erf_nr = row.get("ErfNr")
                 info = extra.get(erf_nr, {})
                 doc_type = row.get("DokumentTyp") or dokument_row.get("DokumentTyp")
-                confirmed_at = datetime.fromisoformat(row["BestaetigtAm"]) if row.get("BestaetigtAm") else None
+                confirmed_at = _parse_datetime(row.get("BestaetigtAm"))
 
                 belegdatum_raw = dokument_row.get("Belegdatum")
                 ocr_raw = dokument_row.get("OcrAbgeschlossenAm")
@@ -946,81 +1437,19 @@ def get_assignment_rows() -> tuple[list[AssignmentRow], str | None]:
                         confidence_class="success",
                         confirmed_at=confirmed_at,
                         confirmed_by=row.get("BestaetigtVon"),
-                        belegdatum=date.fromisoformat(belegdatum_raw) if belegdatum_raw else None,
+                        belegdatum=_parse_date_value(belegdatum_raw),
                         betrag=_decimal_or_none(dokument_row.get("Betrag")),
                         waehrung=dokument_row.get("Waehrung"),
-                        ocr_completed_at=datetime.fromisoformat(ocr_raw) if ocr_raw else None,
-                        matching_completed_at=datetime.fromisoformat(matching_raw) if matching_raw else None,
+                        ocr_completed_at=_parse_datetime(ocr_raw),
+                        matching_completed_at=_parse_datetime(matching_raw),
                     )
                 )
         except Exception as exc:  # noqa: BLE001 – Seite soll trotzdem laden
-            warning = warning or f"Datenbankverbindung fehlgeschlagen: {_short_error(exc)}"
+            warning = warning or _friendly_db_error(exc)
 
-    return rows, warning
-
-
-ASSIGNMENT_SORT_FIELDS = {
-    "document": lambda r: r.filename.casefold(),
-    "date": lambda r: r.received_at,
-    "status": lambda r: r.status,
-    "order": lambda r: r.candidate_erf_nr or "",
-    "confidence": lambda r: r.confidence if r.confidence is not None else -1.0,
-}
-
-
-def sort_assignment_rows(
-    rows: list[AssignmentRow],
-    sort: str,
-    direction: str,
-    prioritize_open: bool = False,
-) -> list[AssignmentRow]:
-    """Sortiert Zeilen. prioritize_open zeigt unbestätigte Fälle immer zuerst
-    (Standardansicht der Zuordnungen-Seite: 'offene Fälle zuerst')."""
-    if prioritize_open:
-        return sorted(
-            rows,
-            key=lambda r: (r.status == "Bestätigt", r.confidence if r.confidence is not None else -1.0),
-        )
-    key_fn = ASSIGNMENT_SORT_FIELDS.get(sort, ASSIGNMENT_SORT_FIELDS["date"])
-    return sorted(rows, key=key_fn, reverse=(direction == "desc"))
-
-
-def filter_assignment_rows(
-    rows: list[AssignmentRow],
-    filter_key: str | None,
-    query: str | None,
-) -> list[AssignmentRow]:
-    result = rows
-    if filter_key == "pruefung":
-        result = [r for r in result if r.status == "Prüfung erforderlich"]
-    elif filter_key == "nicht_zuordenbar":
-        result = [r for r in result if r.status in ("Nicht zuordenbar", "Fehlerhaft")]
-    elif filter_key == "bestaetigt":
-        result = [r for r in result if r.status == "Bestätigt"]
-
-    if query:
-        needle = query.casefold()
-        result = [
-            r
-            for r in result
-            if needle in r.filename.casefold()
-            or (r.partner_name and needle in r.partner_name.casefold())
-            or (r.candidate_erf_nr and needle in r.candidate_erf_nr.casefold())
-        ]
+    result = (rows, warning)
+    _cache_set("assignment_rows", result)
     return result
-
-
-def compute_import_status(rows: list[AssignmentRow]) -> dict[str, int]:
-    """Kennzahlen für die 'Import-Status'-Karte auf der Eingang-Seite."""
-    fehlerhaft = sum(1 for r in rows if r.status == "Fehlerhaft")
-    return {
-        "gesamt": len(rows),
-        "abgeschlossen": sum(1 for r in rows if r.status != "Fehlerhaft"),
-        # Verarbeitung läuft synchron (kein Hintergrundjob) – es gibt keinen
-        # Dokumentzustand, der hier ehrlich > 0 wäre.
-        "in_bearbeitung": 0,
-        "fehler": fehlerhaft,
-    }
 
 
 _FILENAME_SAFE = re.compile(r"[^A-Za-z0-9._\- ÄÖÜäöüß]+")
@@ -1067,6 +1496,7 @@ def save_uploaded_pdf(filename: str, content: bytes) -> tuple[Path | None, str |
             counter += 1
 
     target.write_bytes(content)
+    _cache_invalidate("open_items*", "assignment_rows")
     return target, None
 
 
@@ -1104,32 +1534,48 @@ def _parse_order_date(value: str | None) -> date | None:
 
 def get_orders() -> tuple[list[Order], str | None]:
     """Alle aktiven Aufträge (Storno='0') mit abgeleitetem Kundennamen."""
+    cached = _cache_get("orders")
+    if cached is not None:
+        return cached  # type: ignore[return-value]
+
     supabase = _get_supabase()
     if supabase is None:
-        return [], "SUPABASE_URL/SUPABASE_KEY sind nicht gesetzt (.env prüfen)."
+        result = ([], "SUPABASE_URL/SUPABASE_KEY sind nicht gesetzt (.env prüfen).")
+        _cache_set("orders", result)
+        return result
 
     try:
-        haupt = supabase.table("3100_Sdg_Haupt").select("*").eq("Storno", "0").execute()
-        erf_nrs = [row.get("ErfNr") for row in haupt.data if row.get("ErfNr")]
-        adr = (
-            supabase.table("3100_Sdg_Adressen").select("*").in_("ErfNr", erf_nrs).execute()
-            if erf_nrs
-            else None
+        haupt = (
+            supabase.table("3100_Sdg_Haupt")
+            .select("ErfNr, Ref-1, Fracht, Wrg, Datum")
+            .eq("Storno", "0")
+            .execute()
         )
+        erf_nrs = [row.get("ErfNr") for row in haupt.data if row.get("ErfNr")]
+        # Adressen in Chunks laden – große .in_-Listen werden sonst langsam/fehleranfällig.
+        addresses: dict[str, dict[str, str | None]] = {}
+        chunk_size = 100
+        for i in range(0, len(erf_nrs), chunk_size):
+            chunk = erf_nrs[i : i + chunk_size]
+            adr = (
+                supabase.table("3100_Sdg_Adressen")
+                .select("ErfNr, Art, Name1, Name2")
+                .in_("ErfNr", chunk)
+                .execute()
+            )
+            for row in adr.data:
+                nr = row.get("ErfNr")
+                if nr is None:
+                    continue
+                slot = addresses.setdefault(nr, {})
+                if row.get("Art") == 1 and "sender" not in slot:
+                    slot["sender"] = row.get("Name1") or row.get("Name2")
+                elif row.get("Art") == 2 and "receiver" not in slot:
+                    slot["receiver"] = row.get("Name1") or row.get("Name2")
     except Exception as exc:  # noqa: BLE001
-        return [], f"Datenbankverbindung fehlgeschlagen: {_short_error(exc)}"
-
-    addresses: dict[str, dict[str, str | None]] = {}
-    if adr is not None:
-        for row in adr.data:
-            nr = row.get("ErfNr")
-            if nr is None:
-                continue
-            slot = addresses.setdefault(nr, {})
-            if row.get("Art") == 1 and "sender" not in slot:
-                slot["sender"] = row.get("Name1") or row.get("Name2")
-            elif row.get("Art") == 2 and "receiver" not in slot:
-                slot["receiver"] = row.get("Name1") or row.get("Name2")
+        result = ([], _friendly_db_error(exc))
+        _cache_set("orders", result, ttl=_CACHE_ERROR_TTL_SECONDS)
+        return result
 
     orders: list[Order] = []
     for row in haupt.data:
@@ -1149,7 +1595,9 @@ def get_orders() -> tuple[list[Order], str | None]:
                 datum=_parse_order_date(row.get("Datum")),
             )
         )
-    return orders, None
+    result = (orders, None)
+    _cache_set("orders", result)
+    return result
 
 
 def search_orders(query: str, limit: int = 8) -> tuple[list[Order], str | None]:
@@ -1359,16 +1807,6 @@ def get_document_entries() -> tuple[list[DocumentEntry], str | None]:
     return entries, warning1 or warning2
 
 
-def compute_document_status_counts(entries: list[DocumentEntry]) -> dict[str, int]:
-    """Kennzahlen für die klickbare Statusübersicht."""
-    return {
-        "alle": len(entries),
-        "zugeordnet": sum(1 for e in entries if e.row.status == "Bestätigt"),
-        "pruefung": sum(1 for e in entries if e.row.status == "Prüfung erforderlich"),
-        "nicht_zuordenbar": sum(1 for e in entries if e.row.status in ("Nicht zuordenbar", "Fehlerhaft")),
-    }
-
-
 def filter_document_entries(
     entries: list[DocumentEntry],
     status_filter: str | None,
@@ -1378,7 +1816,7 @@ def filter_document_entries(
     query: str | None,
 ) -> list[DocumentEntry]:
     result = entries
-    if status_filter == "zugeordnet":
+    if status_filter in ("zugeordnet", "bestaetigt"):
         result = [e for e in result if e.row.status == "Bestätigt"]
     elif status_filter == "pruefung":
         result = [e for e in result if e.row.status == "Prüfung erforderlich"]
@@ -1398,6 +1836,7 @@ def filter_document_entries(
             for e in result
             if needle in e.row.filename.casefold()
             or (e.row.partner_name and needle in e.row.partner_name.casefold())
+            or (e.row.candidate_erf_nr and needle in e.row.candidate_erf_nr.casefold())
         ]
     return result
 
@@ -1412,36 +1851,23 @@ DOCUMENT_SORT_FIELDS = {
 }
 
 
-def sort_document_entries(entries: list[DocumentEntry], sort: str, direction: str) -> list[DocumentEntry]:
+def sort_document_entries(
+    entries: list[DocumentEntry],
+    sort: str,
+    direction: str,
+    prioritize_open: bool = False,
+) -> list[DocumentEntry]:
+    """Sortiert Dokumenteinträge. prioritize_open zeigt unbestätigte zuerst."""
+    if prioritize_open:
+        return sorted(
+            entries,
+            key=lambda e: (
+                e.row.status == "Bestätigt",
+                e.row.confidence if e.row.confidence is not None else -1.0,
+            ),
+        )
     key_fn = DOCUMENT_SORT_FIELDS.get(sort, DOCUMENT_SORT_FIELDS["datum"])
     return sorted(entries, key=key_fn, reverse=(direction == "desc"))
-
-
-def get_document_entry(doc_path_str: str) -> tuple[DocumentEntry | None, str | None]:
-    """Ein einzelner Archiv-Eintrag für das Detail-Panel."""
-    entries, warning = get_document_entries()
-    for entry in entries:
-        if entry.row.path == doc_path_str:
-            return entry, warning
-    return None, warning
-
-
-def get_document_file_info(doc_path_str: str) -> tuple[str | None, int | None]:
-    """(erkannte Belegnummer, Dateigröße in Bytes) für die Detailansicht.
-
-    Die Belegnummer kommt aus der gespeicherten Dokumente-Zeile (kein
-    erneutes OCR mehr nötig – wurde schon bei der Erstverarbeitung erkannt).
-    """
-    pdf_path = resolve_document_path(doc_path_str)
-    if pdf_path is None:
-        return None, None
-
-    size = pdf_path.stat().st_size
-    supabase = _get_supabase()
-    row = _fetch_dokument_row(supabase, str(pdf_path))
-    order_number = row.get("ErkannteAuftragsnummer") if row else None
-
-    return order_number, size
 
 
 # --- Auswertungen -----------------------------------------------------------
@@ -1455,7 +1881,7 @@ def get_document_file_info(doc_path_str: str) -> tuple[str | None, int | None]:
 # nicht konfigurierbar (siehe Einstellungen: nur die obere Schwelle für
 # "Hohe Übereinstimmung" ist eine Nutzereinstellung). Die obere Grenze wird
 # dynamisch über get_high_confidence_threshold() übergeben, damit dieselbe
-# Schwelle wie auf Dashboard/Zuordnungen/Dokumente genutzt wird.
+# Schwelle wie auf Dashboard/Dokumentenzuordnung und Auswertungen genutzt wird.
 CONFIDENCE_MEDIUM = 0.50
 
 
@@ -1483,7 +1909,7 @@ def get_dokument_stats() -> tuple[list[DokumentStat], str | None]:
     try:
         resp = supabase.table("Dokumente").select("*").execute()
     except Exception as exc:  # noqa: BLE001
-        return [], f"Datenbankverbindung fehlgeschlagen: {_short_error(exc)}"
+        return [], _friendly_db_error(exc)
 
     stats: list[DokumentStat] = []
     for row in resp.data:
@@ -1498,12 +1924,12 @@ def get_dokument_stats() -> tuple[list[DokumentStat], str | None]:
                 filename=row.get("Dateiname") or "",
                 status=row.get("Status") or "importiert",
                 score=float(score) if score is not None else None,
-                belegdatum=date.fromisoformat(belegdatum_raw) if belegdatum_raw else None,
+                belegdatum=_parse_date_value(belegdatum_raw),
                 betrag=_decimal_or_none(row.get("Betrag")),
                 waehrung=row.get("Waehrung"),
                 erf_nr=row.get("ErfNr"),
-                imported_at=datetime.fromisoformat(imported_raw),
-                matching_completed_at=datetime.fromisoformat(matching_raw) if matching_raw else None,
+                imported_at=_parse_datetime(imported_raw) or _now(),
+                matching_completed_at=_parse_datetime(matching_raw),
             )
         )
     return stats, None

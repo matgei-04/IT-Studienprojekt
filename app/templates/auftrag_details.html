@@ -28,7 +28,7 @@
 
     {% if summary.status == "Prüfung erforderlich" %}
     <p class="hint-text">
-      <a href="/zuordnungen?q={{ summary.order.erf_nr|urlencode }}">Alle offenen Zuordnungen zu diesem Auftrag ansehen →</a>
+      <a href="/dokumente?status=pruefung&q={{ summary.order.erf_nr|urlencode }}">Alle offenen Zuordnungen zu diesem Auftrag ansehen →</a>
     </p>
     {% endif %}
   </section>
@@ -58,8 +58,8 @@
               <td>{{ status_badge(doc) }}</td>
               <td>
                 {% if doc.file_exists %}
-                  <a class="btn btn-secondary btn-small" href="/zuordnung/pruefen?doc={{ doc.path|urlencode }}">
-                    {{ "Ansehen" if doc.status == "Bestätigt" else "Prüfen" }}
+                  <a class="btn {{ 'btn-primary' if doc.status == 'Bestätigt' else 'btn-secondary' }} btn-small" href="/zuordnung/pruefen?doc={{ doc.path|urlencode }}">
+                    {{ "Bearbeiten" if doc.status == "Bestätigt" else "Prüfen" }}
                   </a>
                 {% else %}
                   <span class="hint-text">Nicht verfügbar</span>

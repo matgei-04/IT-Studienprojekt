@@ -2,8 +2,23 @@
 <html lang="de">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no">
 <title>{{ page_title }} – Name</title>
 <link rel="stylesheet" href="/static/style.css">
+<script>
+  // Desktop-Fenster: 100% Zoom, kein horizontales Verschieben der Seite.
+  (function () {
+    try {
+      document.documentElement.style.zoom = "1";
+      document.addEventListener("gesturestart", function (e) { e.preventDefault(); }, { passive: false });
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener("resize", function () {
+          document.documentElement.style.zoom = "1";
+        });
+      }
+    } catch (e) {}
+  })();
+</script>
 </head>
 <body>
 <div class="app-shell">

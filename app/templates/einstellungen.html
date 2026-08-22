@@ -108,7 +108,7 @@
         <form method="post" action="/einstellungen/matching" class="settings-form">
           <label class="field-label" for="schwelle">Ab diesem Confidence-Score (%) gilt ein Vorschlag als „Hohe Übereinstimmung“</label>
           <input class="schwelle-input" type="number" id="schwelle" name="schwelle" min="0" max="100" step="1" value="{{ einstellungen.schwelle_hohe_uebereinstimmung }}" required>
-          <p class="hint-text">Die Schwelle beeinflusst die Kennzeichnung von Vorschlägen, nicht die Pflicht zur Bestätigung. Bereits gespeicherte Confidence-Scores werden nicht verändert – nur ihre Anzeige-Kategorie auf Dashboard, Zuordnungen, Dokumenten und Auswertungen.</p>
+          <p class="hint-text">Die Schwelle beeinflusst die Kennzeichnung von Vorschlägen, nicht die Pflicht zur Bestätigung. Bereits gespeicherte Confidence-Scores werden nicht verändert – nur ihre Anzeige-Kategorie auf Dashboard, Dokumentenzuordnung und Auswertungen.</p>
           <button class="btn btn-primary" type="submit">Änderungen speichern</button>
         </form>
       </section>

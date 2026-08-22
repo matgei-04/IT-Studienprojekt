@@ -10,8 +10,8 @@ from matching.scoring import score_candidate
 
 class DocumentMatcher:
     """
-    Sucht passende Aufträge und bewertet sie.
-    confidence = Matching-Score.
+    Sucht nur über erkannte Auftragsnummer (ErfNr).
+    Ohne Nummer oder ohne DB-Treffer → keine automatische Zuordnung.
     needs_manual_review ist immer True.
     """
 
@@ -20,22 +20,30 @@ class DocumentMatcher:
         self.min_score = min_score
 
     def match(self, document: IncomingDocument) -> MatchResult:
-        """Kandidaten suchen → bewerten → besten Vorschlag zurückgeben."""
-        candidates = []
+        """Nur ErfNr-Suche; Absender-/Text-Fallback gibt es nicht."""
+        if not document.order_number:
+            return MatchResult(
+                erf_nr=None,
+                confidence=0.0,
+                candidate=None,
+                breakdown=ScoreBreakdown(
+                    reasons=["Keine Auftragsnummer erkannt – manuelle Zuordnung nötig."]
+                ),
+                matched=False,
+                needs_manual_review=True,
+            )
 
-        if document.order_number:
-            candidates = self.repository.find_by_order_number(document.order_number)
-
-        if not candidates:
-            candidates = self.repository.search_by_text(document)
-
+        candidates = self.repository.find_by_order_number(document.order_number)
         if not candidates:
             return MatchResult(
                 erf_nr=None,
                 confidence=0.0,
                 candidate=None,
                 breakdown=ScoreBreakdown(
-                    reasons=["Keine Kandidaten – manuelle Zuordnung nötig."]
+                    reasons=[
+                        f"Keine Sendung zu Auftragsnummer {document.order_number} – "
+                        "manuelle Zuordnung nötig."
+                    ]
                 ),
                 matched=False,
                 needs_manual_review=True,
@@ -48,7 +56,6 @@ class DocumentMatcher:
 
         ranked.sort(key=lambda item: item[0], reverse=True)
         best_score, best_candidate, best_breakdown = ranked[0]
-
         best_breakdown.reasons.append("Manuelle Bestätigung durch User nötig.")
 
         return MatchResult(

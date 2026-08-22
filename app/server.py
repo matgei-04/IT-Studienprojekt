@@ -13,7 +13,7 @@ import json
 import mimetypes
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 
 from app import data, routes
 
@@ -125,11 +125,24 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/":
                 _render_html(self, routes.dashboard(query))
             elif path == "/zuordnungen":
-                _render_html(self, routes.zuordnungen(query))
+                params: dict[str, str] = {}
+                legacy = query.get("filter")
+                if legacy == "bestaetigt" or legacy == "automatisch":
+                    params["status"] = "bestaetigt"
+                elif legacy in {"pruefung", "nicht_zuordenbar"}:
+                    params["status"] = legacy
+                if query.get("q"):
+                    params["q"] = query["q"]
+                if query.get("error"):
+                    params["error"] = query["error"]
+                target = f"/dokumente?{urlencode(params)}" if params else "/dokumente"
+                _redirect(self, target)
             elif path == "/zuordnung/pruefen":
                 _render_html(self, routes.pruefen(query))
+            elif path == "/api/auftraege/suche":
+                _render_json(self, routes.search_orders_api(query))
             elif path == "/eingang":
-                _render_html(self, routes.eingang(query))
+                _redirect(self, "/")
             elif path == "/auftraege":
                 _render_html(self, routes.auftraege(query))
             elif path == "/auftrag/details":
@@ -174,6 +187,16 @@ class Handler(BaseHTTPRequestHandler):
                 location = routes.confirm(form)
                 _redirect(self, location)
 
+            elif path == "/zuordnung/loeschen":
+                body = _read_body(self) or b""
+                form = _single_valued(parse_qs(body.decode("utf-8")))
+                _redirect(self, routes.delete_assignment(form))
+
+            elif path == "/dokument/loeschen":
+                body = _read_body(self) or b""
+                form = _single_valued(parse_qs(body.decode("utf-8")))
+                _redirect(self, routes.delete_document(form))
+
             elif path == "/einstellungen/verbindung-pruefen":
                 _redirect(self, routes.einstellungen_verbindung_pruefen())
 
@@ -207,5 +230,7 @@ def start_server(host: str = "127.0.0.1", port: int = 0) -> tuple[ThreadingHTTPS
 
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
+    # OCR/Matching nicht im Page-Load – neue/fehlerhafte PDFs im Hintergrund
+    threading.Thread(target=data.process_pending_documents, daemon=True).start()
 
     return server, bound_port

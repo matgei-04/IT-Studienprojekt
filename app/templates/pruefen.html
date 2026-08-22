@@ -7,7 +7,7 @@
     <h1>Zuordnung prüfen</h1>
     <p class="page-subtitle">{{ item.filename }}</p>
   </div>
-  <a class="btn btn-secondary" href="/zuordnungen">← Zurück zur Liste</a>
+  <a class="btn btn-secondary" href="/dokumente">← Zurück zur Liste</a>
 </div>
 
 {% if item.note %}
@@ -39,8 +39,10 @@
       <iframe src="/dokument/datei?doc={{ item.path|urlencode }}&mode=inline" title="PDF-Vorschau: {{ item.filename }}"></iframe>
     </div>
     <div class="detail-actions">
+      {% if item.path %}
       <a class="btn btn-secondary btn-small" href="/dokument/datei?doc={{ item.path|urlencode }}&mode=inline" target="_blank">PDF öffnen ↗</a>
       <a class="btn btn-secondary btn-small" href="/dokument/datei?doc={{ item.path|urlencode }}&mode=download">Herunterladen</a>
+      {% endif %}
     </div>
   </section>
 
@@ -50,8 +52,36 @@
       {% if candidate %}
       <dl class="detail-list">
         <dt>ErfNr</dt><dd>{{ candidate.erf_nr }}</dd>
-        <dt>Absender</dt><dd>{{ candidate.sender_name or "–" }}</dd>
-        <dt>Empfänger</dt><dd>{{ candidate.receiver_name or "–" }}</dd>
+        <dt>Absender</dt>
+        <dd>
+          <div class="party-block">
+            <div>{{ candidate.sender_name or "–" }}</div>
+            {% if candidate.sender_street or candidate.sender_plz or candidate.sender_city %}
+            <div class="party-address">
+              {% if candidate.sender_street %}{{ candidate.sender_street }}{% endif %}
+              {% if candidate.sender_street and (candidate.sender_plz or candidate.sender_city) %}<br>{% endif %}
+              {% if candidate.sender_plz or candidate.sender_city %}
+                {{ candidate.sender_plz or "" }}{% if candidate.sender_plz and candidate.sender_city %} {% endif %}{{ candidate.sender_city or "" }}
+              {% endif %}
+            </div>
+            {% endif %}
+          </div>
+        </dd>
+        <dt>Empfänger</dt>
+        <dd>
+          <div class="party-block">
+            <div>{{ candidate.receiver_name or "–" }}</div>
+            {% if candidate.receiver_street or candidate.receiver_plz or candidate.receiver_city %}
+            <div class="party-address">
+              {% if candidate.receiver_street %}{{ candidate.receiver_street }}{% endif %}
+              {% if candidate.receiver_street and (candidate.receiver_plz or candidate.receiver_city) %}<br>{% endif %}
+              {% if candidate.receiver_plz or candidate.receiver_city %}
+                {{ candidate.receiver_plz or "" }}{% if candidate.receiver_plz and candidate.receiver_city %} {% endif %}{{ candidate.receiver_city or "" }}
+              {% endif %}
+            </div>
+            {% endif %}
+          </div>
+        </dd>
         <dt>Referenz</dt><dd>{{ candidate.referenz or "–" }}</dd>
       </dl>
       {% else %}
@@ -72,9 +102,12 @@
       {% endif %}
     </section>
 
-    {% if not confirmed %}
     <section class="card">
-      {% if candidate %}
+      <div class="card-header">
+        <h2>{{ "Zuordnung ersetzen" if confirmed else "Manuelle Zuordnung" }}</h2>
+      </div>
+
+      {% if not confirmed and candidate %}
       <form method="post" action="/zuordnung/bestaetigen"
             onsubmit="return confirm('Zuordnung zu Auftrag {{ candidate.erf_nr }} wirklich bestätigen?');">
         <input type="hidden" name="doc" value="{{ item.path }}">
@@ -83,40 +116,153 @@
         <input type="hidden" name="document_type" value="{{ item.document_type }}">
         <button class="btn btn-primary" type="submit">Zuordnung bestätigen</button>
       </form>
+      <p class="hint-text">Oder einen anderen Auftrag manuell zuordnen:</p>
+      {% elif confirmed %}
+      <p class="hint-text">
+        Aktuell zugeordnet zu Auftrag <strong>{{ confirmed.ErfNr }}</strong>.
+        Suche einen anderen Auftrag – die bestehende Zuordnung wird dabei ersetzt.
+      </p>
       {% else %}
       <p class="hint-text">Kein automatischer Kandidat gefunden. Auftrag manuell suchen und zuordnen:</p>
-      <form method="get" action="/zuordnung/pruefen" class="manual-search-form">
-        <input type="hidden" name="doc" value="{{ item.path }}">
-        <input class="text-input" type="text" name="manual_q" placeholder="Auftragsnummer oder Kunde" value="{{ manual_q or '' }}">
-        <button class="btn btn-secondary btn-small" type="submit">Suchen</button>
-      </form>
+      {% endif %}
 
-      {% if manual_q %}
-        {% if manual_results %}
-        <ul class="manual-result-list">
-          {% for order in manual_results %}
-          <li class="manual-result-row">
-            <div>
-              <div class="cell-primary">{{ order.erf_nr }}</div>
-              <div class="cell-secondary">{{ order.kunde or "–" }}{% if order.beschreibung %} · {{ order.beschreibung }}{% endif %}</div>
-            </div>
-            <form method="post" action="/zuordnung/bestaetigen"
-                  onsubmit="return confirm('Zuordnung zu Auftrag {{ order.erf_nr }} wirklich bestätigen?');">
-              <input type="hidden" name="doc" value="{{ item.path }}">
-              <input type="hidden" name="erf_nr" value="{{ order.erf_nr }}">
-              <input type="hidden" name="document_type" value="{{ item.document_type }}">
-              <button class="btn btn-secondary btn-small" type="submit">Zuordnen</button>
-            </form>
-          </li>
-          {% endfor %}
-        </ul>
-        {% else %}
-        <p class="empty-state">Keine Aufträge gefunden für „{{ manual_q }}“.</p>
-        {% endif %}
-      {% endif %}
-      {% endif %}
+      <div
+        class="manual-search"
+        data-doc="{{ item.path|e }}"
+        data-doc-type="{{ item.document_type|e }}"
+        data-replace="{{ '1' if confirmed else '0' }}"
+        data-current-erf="{{ confirmed.ErfNr if confirmed else '' }}"
+      >
+        <label class="field-label" for="manual-q">Auftragsnummer oder Kunde</label>
+        <input
+          id="manual-q"
+          class="text-input"
+          type="search"
+          autocomplete="off"
+          placeholder="Tippen zum Suchen…"
+          value="{{ manual_q or '' }}"
+        >
+        <div id="manual-status" class="manual-status" aria-live="polite"></div>
+        <ul id="manual-results" class="manual-result-list"></ul>
+      </div>
     </section>
-    {% endif %}
+    <script>
+    (function () {
+      const root = document.querySelector('.manual-search');
+      if (!root) return;
+      const input = document.getElementById('manual-q');
+      const list = document.getElementById('manual-results');
+      const status = document.getElementById('manual-status');
+      const docPath = root.getAttribute('data-doc') || '';
+      const docType = root.getAttribute('data-doc-type') || '';
+      const isReplace = root.getAttribute('data-replace') === '1';
+      const currentErf = root.getAttribute('data-current-erf') || '';
+      let timer = null;
+      let seq = 0;
+
+      function escapeHtml(s) {
+        return String(s == null ? '' : s)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;');
+      }
+
+      function renderResults(items, query) {
+        list.innerHTML = '';
+        if (!query) {
+          status.textContent = '';
+          return;
+        }
+        if (!items.length) {
+          status.textContent = 'Keine Aufträge gefunden für „' + query + '“.';
+          return;
+        }
+        status.textContent = items.length + ' Treffer';
+        items.forEach(function (order) {
+          const li = document.createElement('li');
+          li.className = 'manual-result-row';
+          const meta = [order.kunde || '–'];
+          if (order.beschreibung) meta.push(order.beschreibung);
+          const isCurrent = isReplace && order.erf_nr === currentErf;
+          const actionLabel = isReplace ? 'Ersetzen' : 'Zuordnen';
+          li.innerHTML =
+            '<div>' +
+              '<div class="cell-primary">' + escapeHtml(order.erf_nr) + '</div>' +
+              '<div class="cell-secondary">' + escapeHtml(meta.join(' · ')) + '</div>' +
+            '</div>' +
+            (isCurrent
+              ? '<button class="btn btn-secondary btn-small" type="button" disabled>Aktuell</button>'
+              : '<form method="post" action="/zuordnung/bestaetigen">' +
+                  '<input type="hidden" name="doc" value="' + escapeHtml(docPath) + '">' +
+                  '<input type="hidden" name="erf_nr" value="' + escapeHtml(order.erf_nr) + '">' +
+                  '<input type="hidden" name="document_type" value="' + escapeHtml(docType) + '">' +
+                  '<button class="btn btn-secondary btn-small" type="submit">' + actionLabel + '</button>' +
+                '</form>');
+          if (!isCurrent) {
+            const form = li.querySelector('form');
+            form.addEventListener('submit', function (e) {
+              const msg = isReplace
+                ? 'Zuordnung von Auftrag ' + currentErf + ' durch Auftrag ' + order.erf_nr + ' ersetzen?'
+                : 'Zuordnung zu Auftrag ' + order.erf_nr + ' wirklich bestätigen?';
+              if (!confirm(msg)) {
+                e.preventDefault();
+              }
+            });
+          }
+          list.appendChild(li);
+        });
+      }
+
+      async function search(q) {
+        const my = ++seq;
+        if (!q) {
+          renderResults([], '');
+          return;
+        }
+        status.textContent = 'Suche…';
+        try {
+          const res = await fetch('/api/auftraege/suche?q=' + encodeURIComponent(q) + '&limit=8');
+          const data = await res.json();
+          if (my !== seq) return;
+          renderResults(data.results || [], q);
+        } catch (err) {
+          if (my !== seq) return;
+          status.textContent = 'Suche fehlgeschlagen.';
+          list.innerHTML = '';
+        }
+      }
+
+      input.addEventListener('input', function () {
+        const q = input.value.trim();
+        clearTimeout(timer);
+        timer = setTimeout(function () { search(q); }, 220);
+      });
+
+      if (input.value.trim()) search(input.value.trim());
+      if (!isReplace) input.focus();
+    })();
+    </script>
+
+    <section class="card">
+      <div class="card-header"><h2>Löschen</h2></div>
+      <div class="delete-actions">
+        {% if confirmed %}
+        <form method="post" action="/zuordnung/loeschen"
+              onsubmit="return confirm('Zuordnung wirklich entfernen? Das Dokument bleibt erhalten.');">
+          <input type="hidden" name="doc" value="{{ item.path }}">
+          <input type="hidden" name="next" value="/dokumente">
+          <button class="btn btn-secondary btn-small" type="submit">Zuordnung löschen</button>
+        </form>
+        {% endif %}
+        <form method="post" action="/dokument/loeschen"
+              onsubmit="return confirm('Dokument inkl. Datei wirklich unwiderruflich löschen?');">
+          <input type="hidden" name="doc" value="{{ item.path }}">
+          <input type="hidden" name="next" value="/dokumente">
+          <button class="btn btn-danger btn-small" type="submit">Löschen</button>
+        </form>
+      </div>
+    </section>
   </div>
 </div>
 {% endblock %}
